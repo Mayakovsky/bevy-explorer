@@ -165,6 +165,13 @@ pub fn assemble(
         .add_plugins(SceneBoundPlugin)
         .add_plugins(RestrictedActionsPlugin);
 
+    // Emanate: a synthetic client (not a scene server) moves its own avatar through the real
+    // movement physics: the camera-free PostUpdate pipeline (rotation, ground collider,
+    // collision resolution, apply_movement). A server never moves a player.
+    if !server_mode {
+        app.add_plugins(user_input::avatar_movement::AvatarMovementPlugin);
+    }
+
     register_gltf_scene_types(app);
 
     // embedded assets: the scene-loading material (grid.png / loading.wgsl)
@@ -300,6 +307,8 @@ fn setup(
     config: Res<AppConfig>,
     wallet: Res<Wallet>,
     mut current_profile: ResMut<CurrentUserProfile>,
+    synth: Option<Res<SynthIdentity>>,
+    ipfas: ipfs::IpfsAssetServer,
 ) {
     // fake player: process_scene_lifecycle early-returns without a PrimaryUser,
     // and PrimaryEntities::player() panics without the marker. Placed at the scene
@@ -340,6 +349,31 @@ fn setup(
     cam_resource.0 = camera_id;
 
     // wallet is already finalized in main(); build the profile from its address
+    if let Some(synth) = synth {
+        // Emanate: a real (non-guest) account publishes a minimal named profile with the
+        // default body and wearables (`SerializedProfile::default`'s avatar). Version 1 so a
+        // peer's catalyst copy is refreshed; `is_deployed = false` lets `setup_primary_profile`
+        // deploy it once. Guests keep the guard below.
+        let address = format!("{:#x}", wallet.address().unwrap());
+        println!("[headless] account address: {address}");
+        current_profile.profile = Some(UserProfile {
+            version: 1,
+            content: SerializedProfile {
+                name: synth.name.clone(),
+                version: 1,
+                eth_address: address.clone(),
+                user_id: Some(address),
+                has_connected_web3: Some(true),
+                ..Default::default()
+            },
+            base_url: ipfas.ipfs().contents_endpoint().unwrap_or_default(),
+        });
+        // held until the realm's entities endpoint is known (`synth::release_profile_deploy`):
+        // deploying on frame 0 fails with "no entities endpoint"
+        current_profile.is_deployed = false;
+        current_profile.deploy_held = true;
+        return;
+    }
     println!("[headless] guest address: {:#x}", wallet.address().unwrap());
     current_profile.profile = Some(UserProfile {
         version: 0,
@@ -352,6 +386,13 @@ fn setup(
     });
     // guard against the auto-deploy of the guest profile (login.rs pattern)
     current_profile.is_deployed = true;
+}
+
+/// Emanate: present only when the client runs as a real account (`--wallet-key-file`).
+/// Carries the display name published on its profile.
+#[derive(Resource, Clone)]
+pub struct SynthIdentity {
+    pub name: String,
 }
 
 /// Answer queued permission requests by the headless policy. The Ask queue's only

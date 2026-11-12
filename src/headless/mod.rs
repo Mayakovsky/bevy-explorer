@@ -7,8 +7,12 @@
 
 mod app;
 mod logs;
+#[cfg(not(target_arch = "wasm32"))]
+mod synth;
+#[cfg(not(target_arch = "wasm32"))]
+pub use synth::SynthPlugin;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
-pub use app::{assemble, config};
+pub use app::{assemble, config, SynthIdentity};
 pub use logs::{drain_scene_logs, scene_log_level, SceneLogReceivers};

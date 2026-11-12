@@ -79,6 +79,7 @@ fn broadcast_position(
     time: Res<Time>,
     contexts: Query<&GlobalCrdtState>,
     wallet: Res<Wallet>,
+    synth_override: Option<Res<common::structs::SynthBroadcastOverride>>,
 ) {
     // An authoritative server has no avatar to announce — hammurabi's reportPosition is
     // a no-op. Suppress so clients never see a ghost server player.
@@ -275,8 +276,9 @@ fn broadcast_position(
     let is_glide = anim_src_lower
         .as_deref()
         .is_some_and(|s| s.contains("glide"));
-    let jump_count = if is_double_jump || is_glide { 2 } else { 0 };
-    let glide_state = if is_glide {
+    let synth = synth_override.map(|o| *o).unwrap_or_default();
+    let jump_count = (if is_double_jump || is_glide { 2 } else { 0 }).max(synth.jump_count);
+    let glide_state = if is_glide || synth.gliding {
         rfc4::movement::GlideState::Gliding as i32
     } else {
         rfc4::movement::GlideState::PropClosed as i32

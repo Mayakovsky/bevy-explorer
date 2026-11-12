@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod browser_auth;
 pub mod delegation;
+pub mod key_file;
 pub mod remote_signer;
 pub mod signed_login;
 

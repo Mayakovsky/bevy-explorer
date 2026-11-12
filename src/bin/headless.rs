@@ -91,6 +91,16 @@ struct Args {
     #[arg(long, value_name = "seed", help_heading = HEADLESS)]
     wallet_seed: Option<u64>,
 
+    /// Emanate: log in as a real (non-guest) account from the hex private key in this file
+    /// (path only: the key is never taken on the command line or printed). Refused with
+    /// --server-mode/--orchestrated and with --wallet-seed. Unix: the file must be mode 600
+    #[arg(long, value_name = "path", conflicts_with = "wallet_seed", help_heading = HEADLESS)]
+    wallet_key_file: Option<std::path::PathBuf>,
+
+    /// Emanate: display name published on the profile when --wallet-key-file is used
+    #[arg(long, value_name = "name", default_value = "Synth (AI)", help_heading = HEADLESS)]
+    synth_name: String,
+
     /// Pulse realm to announce verbatim; `--server-mode` only, and optional there: absent, the
     /// engine derives the same key from a locally hosted scene's entity id once it loads, this
     /// just announces it sooner. Orchestrated servers host several realms at once and take one
@@ -143,6 +153,10 @@ fn parse_args() -> Args {
     };
     // orchestrated mode is always a server
     args.server_mode |= args.orchestrated;
+    // KEY-3: a real key must never reach a multi-scene / server engine
+    if args.wallet_key_file.is_some() && args.server_mode {
+        usage_error("--wallet-key-file is for the synthetic client only (not --server-mode / --orchestrated)");
+    }
     // standalone server mode is a local-dev flow (single scene on the shared context,
     // self-minted scene room); production servers are always orchestrated
     if args.server_mode && !args.orchestrated && !args.launch.preview {
@@ -346,13 +360,20 @@ fn main() -> AppExit {
 
     // ---- the render-free app (src/headless/app.rs, shared with the web entry) ----
     let mut wallet = Wallet::default();
-    finalize_guest_wallet(&mut wallet, args.wallet_seed);
-    // KEY-3: the orchestrated engine must only ever hold a throwaway identity — the
-    // authoritative key lives in the orchestrator and never reaches this process.
-    assert!(
-        wallet.is_guest(),
-        "orchestrated engine must run with a guest wallet"
-    );
+    if let Some(path) = &args.wallet_key_file {
+        match wallet::key_file::finalize_from_key_file(&mut wallet, path) {
+            Ok(address) => println!("[headless] logged in as real account {address:#x}"),
+            Err(e) => usage_error(format!("--wallet-key-file: {e}")),
+        }
+    } else {
+        finalize_guest_wallet(&mut wallet, args.wallet_seed);
+        // KEY-3: the orchestrated engine must only ever hold a throwaway identity — the
+        // authoritative key lives in the orchestrator and never reaches this process.
+        assert!(
+            wallet.is_guest(),
+            "orchestrated engine must run with a guest wallet"
+        );
+    }
 
     webgpu_build::headless::assemble(
         &mut app,
@@ -363,6 +384,13 @@ fn main() -> AppExit {
         wallet,
     );
     app.insert_resource(delegations);
+    if args.wallet_key_file.is_some() {
+        app.insert_resource(webgpu_build::headless::SynthIdentity {
+            name: args.synth_name.clone(),
+        });
+        // stdin/stdout JSON control channel (src/headless/synth.rs)
+        app.add_plugins(webgpu_build::headless::SynthPlugin);
+    }
     if args.orchestrated {
         // never load by player position — scenes come ONLY from the control channel
         // (portables are exempt from distance loading).

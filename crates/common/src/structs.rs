@@ -1428,6 +1428,15 @@ pub struct EngineMovementControl {
     pub penetration_bounds: (DVec3, DVec3),
 }
 
+/// Emanate: lets a headless synthetic client (which has no scene-driven animation) state its
+/// double-jump / glide to other clients; `broadcast_position` folds this into the rfc4::Movement
+/// `jump_count` / `glide_state`. Absent in every normal client.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct SynthBroadcastOverride {
+    pub jump_count: i32,
+    pub gliding: bool,
+}
+
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub enum MoveKind {
     #[default]
