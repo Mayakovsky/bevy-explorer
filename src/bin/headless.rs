@@ -101,10 +101,14 @@ struct Args {
     #[arg(long, value_name = "name", default_value = "Synth (AI)", help_heading = HEADLESS)]
     synth_name: String,
 
-    /// Emanate: a folder with GenesisTrees.bin and occupied.txt: the Synth then collides with the ground and rocks that desktop players see on
-    /// empty parcels. Absent = off. `--wallet-key-file` clients only
+    /// Emanate: a folder with GenesisTrees.bin and occupied.txt: the Synth then collides with the ground, rocks, trees and bushes that desktop
+    /// players see on empty parcels. Default: `$HOME/emanate-data` when it exists. `--wallet-key-file` clients only
     #[arg(long, value_name = "dir", help_heading = HEADLESS)]
     landscape_data: Option<std::path::PathBuf>,
+
+    /// Emanate: do not load the landscape colliders (the Synth then walks through rocks and over flat ground, as before)
+    #[arg(long, help_heading = HEADLESS)]
+    no_landscape: bool,
 
     /// Pulse realm to announce verbatim; `--server-mode` only, and optional there: absent, the
     /// engine derives the same key from a locally hosted scene's entity id once it loads, this
@@ -395,7 +399,16 @@ fn main() -> AppExit {
         });
         // stdin/stdout JSON control channel (src/headless/synth.rs)
         app.add_plugins(webgpu_build::headless::SynthPlugin);
-        if let Some(dir) = args.landscape_data.clone() {
+        let landscape = if args.no_landscape {
+            None
+        } else {
+            args.landscape_data.clone().or_else(|| {
+                std::env::var_os("HOME")
+                    .map(|home| std::path::PathBuf::from(home).join("emanate-data"))
+                    .filter(|dir| dir.join("GenesisTrees.bin").exists())
+            })
+        };
+        if let Some(dir) = landscape {
             app.add_plugins(webgpu_build::headless::LandscapePlugin { dir });
         }
     }

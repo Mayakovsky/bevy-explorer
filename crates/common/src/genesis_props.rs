@@ -33,21 +33,45 @@ pub struct Prototype {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Collider {
     None,
-    /// A Y-axis capsule of `radius` and total `height` at the prefab's child scale `(sx, sy, sz)`, centred on the instance.
+    /// A Y-axis capsule of `radius` and total `height` at the prefab's child scale `(sx, sy, sz)`, centred on the instance (the rocks).
     Capsule { radius: f32, height: f32, child_scale: [f32; 3] },
-    /// Prefab read but not yet ported (tree and Bush02 trunks).
-    Unported,
+    /// The prefab's collision children (trees: trunk and branch capsules plus crown spheres; Bush02: one stem capsule).
+    Shapes(&'static [Shape]),
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Kind {
+    Capsule,
+    Sphere,
+}
+
+/// One collider of a prefab, in the prefab's local space (Unity, left-handed): the child's transform and the collider's own parameters.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shape {
+    pub kind: Kind,
+    pub pos: [f32; 3],
+    /// quaternion x, y, z, w
+    pub rot: [f32; 4],
+    pub scale: [f32; 3],
+    pub centre: [f32; 3],
+    pub radius: f32,
+    pub height: f32,
+    /// capsule axis: 0 = X, 1 = Y, 2 = Z
+    pub dir: u8,
+}
+
+mod shapes;
+use shapes::{BUSH02_SHAPES, TREE01_SHAPES, TREE02_SHAPES, TREE03_SHAPES};
 
 pub const PROTOTYPES: [Prototype; 8] = [
     Prototype { name: "Bush01", radius: 2.0, scale: (2.0, 3.0), collider: Collider::None },
-    Prototype { name: "Bush02", radius: 2.0, scale: (2.0, 3.0), collider: Collider::Unported },
+    Prototype { name: "Bush02", radius: 2.0, scale: (2.0, 3.0), collider: Collider::Shapes(&BUSH02_SHAPES) },
     Prototype { name: "Stone01", radius: 1.0, scale: (1.0, 4.0), collider: Collider::Capsule { radius: 0.5, height: 2.0, child_scale: [1.71718, 1.01659, 1.7924199] } },
     Prototype { name: "Stone02", radius: 1.0, scale: (1.0, 4.0), collider: Collider::Capsule { radius: 0.5, height: 2.0, child_scale: [1.2314928, 0.96884936, 1.2854519] } },
     Prototype { name: "Stone03", radius: 1.0, scale: (1.0, 4.0), collider: Collider::Capsule { radius: 0.5, height: 2.0, child_scale: [1.5168672, 0.94172555, 1.0701506] } },
-    Prototype { name: "Tree01", radius: 10.0, scale: (0.75, 1.25), collider: Collider::Unported },
-    Prototype { name: "Tree02", radius: 10.0, scale: (0.75, 1.0), collider: Collider::Unported },
-    Prototype { name: "Tree03", radius: 13.0, scale: (0.75, 1.0), collider: Collider::Unported },
+    Prototype { name: "Tree01", radius: 10.0, scale: (0.75, 1.25), collider: Collider::Shapes(&TREE01_SHAPES) },
+    Prototype { name: "Tree02", radius: 10.0, scale: (0.75, 1.0), collider: Collider::Shapes(&TREE02_SHAPES) },
+    Prototype { name: "Tree03", radius: 13.0, scale: (0.75, 1.0), collider: Collider::Shapes(&TREE03_SHAPES) },
 ];
 
 pub struct GenesisProps {
@@ -172,19 +196,71 @@ pub fn overlaps_occupied(position: Vec2, radius: f32, occupied: &impl Fn(IVec2) 
     false
 }
 
-/// A rock's collision capsule in world space (Unity coordinates): its centre line runs from `base` to `top` (spheres of `radius` at both ends).
-/// Unity scales a capsule's radius by max(|x|, |z|) of the lossy scale and its height by |y|; the instance scale multiplies the prefab's child scale.
-pub fn rock_capsule(placed: &Placed, ground_y: f32) -> Option<(Vec3, Vec3, f32)> {
-    let Collider::Capsule { radius, height, child_scale } = PROTOTYPES.get(placed.prototype)?.collider else {
-        return None;
+/// A collider in world space (Unity coordinates: x east, y up, z north).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WorldShape {
+    /// Centre line from `a` to `b`, spheres of `radius` at both ends.
+    Capsule { a: Vec3, b: Vec3, radius: f32 },
+    Sphere { centre: Vec3, radius: f32 },
+}
+
+fn rotate(q: [f32; 4], v: Vec3) -> Vec3 {
+    // v' = q v q^-1 (Unity's quaternion maths is the standard formula in its own axes)
+    let u = Vec3::new(q[0], q[1], q[2]);
+    let w = q[3];
+    2.0 * u.dot(v) * u + (w * w - u.dot(u)) * v + 2.0 * w * u.cross(v)
+}
+
+/// The prefab's colliders placed for an instance: `M_instance * M_child`, with the instance transform = yaw about Y (Unity's sense: x turns
+/// toward -z), scale `(sx, sy, sx)`, translation at the ground height. Radii scale by the largest axis scale perpendicular to the capsule
+/// (spheres: the largest), lengths along the axis by the axis scale.
+pub fn world_shapes(placed: &Placed, ground_y: f32) -> Vec<WorldShape> {
+    let Some(proto) = PROTOTYPES.get(placed.prototype) else {
+        return Vec::new();
     };
-    let s = Vec3::new(child_scale[0], child_scale[1], child_scale[2]) * placed.scale;
-    let r = radius * s.x.abs().max(s.z.abs());
-    let h = (height * s.y.abs()).max(2.0 * r);
-    // the prefab's CapsuleCollider is centred on its child at the instance origin (centre 0,0,0): the capsule straddles the ground height
-    let centre = Vec3::new(placed.position_xz.x, ground_y, placed.position_xz.y);
-    let half = (h * 0.5 - r).max(0.0);
-    Some((centre - Vec3::Y * half, centre + Vec3::Y * half, r))
+    let single;
+    let shapes: &[Shape] = match proto.collider {
+        Collider::None => return Vec::new(),
+        Collider::Shapes(list) => list,
+        Collider::Capsule { radius, height, child_scale } => {
+            single = [Shape { kind: Kind::Capsule, pos: [0.0; 3], rot: [0.0, 0.0, 0.0, 1.0], scale: child_scale, centre: [0.0; 3], radius, height, dir: 1 }];
+            &single
+        }
+    };
+    let (sin, cos) = placed.yaw_degrees.to_radians().sin_cos();
+    let origin = Vec3::new(placed.position_xz.x, ground_y, placed.position_xz.y);
+    let to_world = |local: Vec3| {
+        let s = local * placed.scale;
+        origin + Vec3::new(s.x * cos + s.z * sin, s.y, -s.x * sin + s.z * cos)
+    };
+    let mut out = Vec::new();
+    for sh in shapes {
+        let child_scale = Vec3::from(sh.scale);
+        let total = child_scale * placed.scale; // lossy scale, ignoring the child's own rotation
+        let at = |local: Vec3| to_world(Vec3::from(sh.pos) + rotate(sh.rot, local * child_scale));
+        let centre = Vec3::from(sh.centre);
+        match sh.kind {
+            Kind::Sphere => out.push(WorldShape::Sphere { centre: at(centre), radius: sh.radius * total.abs().max_element() }),
+            Kind::Capsule => {
+                let axis = match sh.dir {
+                    0 => Vec3::X,
+                    1 => Vec3::Y,
+                    _ => Vec3::Z,
+                };
+                let perp = match sh.dir {
+                    0 => total.y.abs().max(total.z.abs()),
+                    1 => total.x.abs().max(total.z.abs()),
+                    _ => total.x.abs().max(total.y.abs()),
+                };
+                let r = sh.radius * perp;
+                // endpoints at +-(height/2 - radius) along the axis in the collider's own frame, carried through the child and instance transforms
+                let local_half = (sh.height * 0.5 - sh.radius).max(0.0);
+                let (a, b) = (at(centre - axis * local_half), at(centre + axis * local_half));
+                out.push(WorldShape::Capsule { a, b, radius: r });
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
