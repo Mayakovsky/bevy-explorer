@@ -180,12 +180,16 @@ pub fn nav_plan(
             start_glide(&mut nav, choice, usize::from(choice.is_some()), from, ms, time.elapsed_secs(), "to");
         }
         NavRequest::Spots { max_cost } => {
-            let cells = Planner::new(&mut world).reachable(from, max_cost, &cfg());
+            // the spot list reaches farther than a route plan does (a long run, up to about 100 m, needs spots near the top of its budget)
+            let spot_cfg = PlanConfig { radius_cells: 105, max_nodes: 30_000, ..cfg() };
+            let cells = Planner::new(&mut world).reachable(from, max_cost, &spot_cfg);
             let ms = t0.elapsed().as_millis() as u64;
-            // one spot per 3 m square, the cheapest in it, so the list stays a few hundred
-            let mut best: std::collections::HashMap<(i32, i32, i32), (Vec3, f32)> = std::collections::HashMap::new();
+            // one spot per square, the cheapest in it: 3 m squares near the Synth, 6 m squares from 30 m of walking, 10 m squares from 70 m, so the list reaches the
+            // whole walking range with under a thousand spots (the first version kept the 700 nearest and never listed anything farther than about 47 m)
+            let mut best: std::collections::HashMap<(i32, i32, i32, i32), (Vec3, f32)> = std::collections::HashMap::new();
             for (p, c) in cells {
-                let key = ((p.x / 3.0).floor() as i32, (p.z / 3.0).floor() as i32, (p.y / 1.5).floor() as i32);
+                let (cell, band) = if c < 30.0 { (3.0, 0) } else if c < 70.0 { (6.0, 1) } else { (10.0, 2) };
+                let key = ((p.x / cell).floor() as i32, (p.z / cell).floor() as i32, (p.y / 1.5).floor() as i32, band);
                 let e = best.entry(key).or_insert((p, c));
                 if c < e.1 {
                     *e = (p, c);
@@ -193,7 +197,7 @@ pub fn nav_plan(
             }
             let mut spots: Vec<_> = best.into_values().collect();
             spots.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            spots.truncate(700);
+            spots.truncate(900);
             let list: Vec<_> = spots
                 .iter()
                 .map(|(p, c)| {
