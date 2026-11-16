@@ -225,3 +225,12 @@ fn a_goal_inside_a_prop_snaps_to_the_nearest_standable_cell() {
     let mut solid = World { boxes: vec![B(10.0, 60.0, -30.0, 30.0, 0.0, 50.0)] };
     assert!(matches!(plan(&mut solid, Vec3::new(0.5, 0.0, 0.5), Vec3::new(30.5, 0.0, 0.5), false), Err(PlanError::NoStart) | Err(PlanError::NoGoal) | Err(PlanError::NoPath { .. })));
 }
+
+#[test]
+fn a_level_goal_that_lands_on_another_level_fails_instead_of_ending_on_the_ground() {
+    // flat ground only: a goal asking for the 6 m level has no standable surface there
+    let mut w = World { boxes: vec![] };
+    assert!(matches!(plan(&mut w, Vec3::new(0.5, 0.0, 0.5), Vec3::new(10.5, 6.0, 0.5), true), Err(PlanError::NoGoal)));
+    // the same goal without a level (any height) still plans
+    assert!(plan(&mut w, Vec3::new(0.5, 0.0, 0.5), Vec3::new(10.5, 6.0, 0.5), false).is_ok());
+}

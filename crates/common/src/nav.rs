@@ -255,6 +255,10 @@ impl<'w, W: NavWorld> Planner<'w, W> {
                 best.map(|(_, n)| n).ok_or(PlanError::NoGoal)?
             }
         };
+        // a goal that asked for a level (a rooftop, a platform) must end on that level: a route that quietly ends on the ground beside it is a failure the caller can act on
+        if to_level && (goal_node.pos().y - to.y).abs() > 1.5 {
+            return Err(PlanError::NoGoal);
+        }
         let goal_pos = goal_node.pos();
         let h = |n: &Node| -> f32 { (n.pos() - goal_pos).length() };
         let mut open = BinaryHeap::new();
