@@ -166,21 +166,49 @@ fn reachable_respects_the_cost_limit() {
     assert!(cells.iter().all(|(p, _)| ((p.x - 0.5).powi(2) + (p.z - 0.5).powi(2)).sqrt() <= 10.5));
 }
 
+fn tower_world() -> World {
+    // a 12 m tower; a 20 m wall 30 m east of it
+    World { boxes: vec![B(0.0, 10.0, 0.0, 10.0, 0.0, 12.0), B(30.0, 31.0, -40.0, 50.0, 0.0, 20.0)] }
+}
+
 #[test]
-fn glide_from_a_roof_lands_about_2_67_times_the_height_away_and_not_through_walls() {
-    // a 12 m tower; a wall 20 m east of it, 20 m high
-    let mut w = World { boxes: vec![B(0.0, 10.0, 0.0, 10.0, 0.0, 12.0), B(30.0, 31.0, -40.0, 50.0, 0.0, 20.0)] };
+fn glide_options_from_a_roof_respect_range_and_walls() {
+    let mut w = tower_world();
     let from = Vec3::new(5.0, 12.0, 5.0);
-    let landings = glide_landings(&mut w, from, 8, 8.0, 3.0);
-    assert!(!landings.is_empty());
-    for (p, _) in &landings {
-        assert!(p.y.abs() < 1.0, "lands on the ground: {p}");
-    }
-    // west (bearing pi): open, lands near 12 * 8/3 = 32 m away
-    let west = landings.iter().find(|(_, a)| (a - std::f32::consts::PI).abs() < 0.1).expect("a westward landing");
-    let d = ((west.0.x - 5.0).powi(2) + (west.0.z - 5.0).powi(2)).sqrt();
-    // 5.5 m run to the ledge (it starts from the middle of the roof) plus 12 m x 8/3 of glide
-    assert!(d > 33.0 && d < 42.0, "{d}");
-    // east (bearing 0): the 20 m wall 25 m past the ledge is in the way, so no landing
-    assert!(landings.iter().all(|(_, a)| a.abs() > 0.1), "no landing through the wall");
+    // a steep glider (3 m/s sink at 8 m/s: 12 m of height buys about 32 m): short landings only
+    let steep = glide_options(&mut w, from, 8, &[10.0, 20.0, 45.0], 8.0, 3.0);
+    assert!(!steep.is_empty());
+    assert!(steep.iter().all(|g| g.landing.y.abs() < 0.01), "lands on the ground");
+    assert!(steep.iter().any(|g| (g.bearing - std::f32::consts::PI).abs() < 0.1), "westward options exist");
+    let west: Vec<f32> = steep.iter().filter(|g| (g.bearing - std::f32::consts::PI).abs() < 0.1).map(|g| ((g.landing.x - g.ledge.x).powi(2) + (g.landing.z - g.ledge.z).powi(2)).sqrt()).collect();
+    assert!(west.iter().all(|d| *d <= 33.0), "the steep glider cannot reach 45 m from 12 m: {west:?}");
+    // east: the 20 m wall stands 20 m past the ledge, so a 10 m landing before it is fine and nothing 20 m or more is
+    assert!(steep.iter().any(|g| g.bearing.abs() < 0.1), "a short landing before the wall");
+    assert!(steep.iter().filter(|g| g.bearing.abs() < 0.1).all(|g| g.landing.x - g.ledge.x < 15.0), "no glide through the wall");
+    // the slow controls-v1 glider (0.3 m/s sink) reaches far: 45 m is fine
+    let slow = glide_options(&mut w, from, 8, &[10.0, 20.0, 45.0], 8.0, 0.3);
+    assert!(slow.iter().any(|g| (g.bearing - std::f32::consts::PI).abs() < 0.1 && ((g.landing.x - g.ledge.x).powi(2) + (g.landing.z - g.ledge.z).powi(2)).sqrt() > 40.0));
+}
+
+#[test]
+fn glide_to_a_goal_picks_a_ledge_and_fails_cleanly_when_it_cannot() {
+    let mut w = tower_world();
+    let from = Vec3::new(5.0, 12.0, 5.0);
+    // a goal on the ground 25 m west: reachable (slow glider)
+    let c = glide_to_goal(&mut w, from, Vec3::new(-25.0, 0.0, 5.0), 8.0, 0.3).expect("a glide");
+    assert!(c.ledge.x < 5.0, "runs off the west edge: {}", c.ledge);
+    assert!((c.landing - Vec3::new(-25.0, 0.0, 5.0)).length() < 1e-4);
+    // the same goal with the steep glider is still within 32 m: fine; 60 m is not
+    assert!(glide_to_goal(&mut w, from, Vec3::new(-25.0, 0.0, 5.0), 8.0, 3.0).is_some());
+    assert!(glide_to_goal(&mut w, from, Vec3::new(-60.0, 0.0, 5.0), 8.0, 3.0).is_none(), "out of range for a 12 m start");
+    // a goal that is not lower than the start cannot be glided to
+    assert!(glide_to_goal(&mut w, from, Vec3::new(-5.0, 11.5, 5.0), 8.0, 0.3).is_none());
+    // a goal behind the 20 m wall: the flight would hit it
+    assert!(glide_to_goal(&mut w, from, Vec3::new(45.0, 0.0, 5.0), 8.0, 0.3).is_none(), "wall in the way");
+}
+
+#[test]
+fn glide_from_the_ground_has_no_ledge() {
+    let mut w = tower_world();
+    assert!(glide_to_goal(&mut w, Vec3::new(-20.0, 0.0, 5.0), Vec3::new(-40.0, 0.0, 5.0), 8.0, 0.3).is_none());
 }

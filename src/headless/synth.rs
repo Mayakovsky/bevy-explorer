@@ -17,7 +17,7 @@
 //! orchestrator spawns this process and already owns its pipes.
 
 mod nav;
-use nav::{nav_follow, nav_plan, Nav, NavRequest};
+use nav::{glide_follow, nav_follow, nav_plan, Nav, NavRequest};
 use std::sync::{mpsc, Mutex};
 
 use bevy::prelude::*;
@@ -51,7 +51,7 @@ const GRAVITY: f32 = 30.0;
 /// Fastest fall.
 const TERMINAL_FALL: f32 = 50.0;
 /// Fall speed while gliding.
-const GLIDE_FALL: f32 = 3.0;
+const GLIDE_FALL: f32 = 0.3; // controls v1: the glider sinks 0.3 m/s while jump is held
 /// Horizontal speed while gliding. With no walk target the glide carries forward along the current
 /// facing, as a real DCL glide does.
 const GLIDE_SPEED: f32 = 8.0;
@@ -88,6 +88,10 @@ pub enum SynthCommand {
         #[serde(default = "default_spot_cost")]
         max_cost: f32,
     },
+    /// Emanate: from a high place, run to the nearest ledge, jump and glide to a landing away from `away_x`/`away_z` (an escape). Events: `glide` planned / failed / landed.
+    GlideEscape { away_x: f32, away_z: f32 },
+    /// Emanate: from a high place, glide to a lower goal (a ledge run, a jump, a straight glide, then the glider closes above the goal). Fails cleanly (`glide` failed, `no_glide`) when the goal cannot be reached by gliding: walk instead.
+    GlideTo { x: f32, y: Option<f32>, z: f32 },
     /// Abandon the current walk/run target.
     Stop,
     /// Ground: takeoff. In the air: DCL's sequence, first press = double jump, second = open the
@@ -188,7 +192,7 @@ impl Plugin for SynthPlugin {
             .add_systems(Startup, announce)
             .add_systems(
                 Update,
-                (release_profile_deploy, drain_commands, nav_plan, nav_follow, drive, emit_chat, track_players)
+                (release_profile_deploy, drain_commands, nav_plan, nav_follow, glide_follow, drive, emit_chat, track_players)
                     .chain()
                     // after the engine picked the active AvatarMovement for this frame, before the
                     // PostUpdate movement pipeline applies it
@@ -266,6 +270,13 @@ fn drain_commands(
                 nav.replans = 0;
                 nav.pending = Some(NavRequest::To { target: to_bevy(x, y.unwrap_or(0.0), z), level: y.is_some(), run });
             }
+            SynthCommand::GlideTo { x, y, z } => {
+                nav.pending = Some(NavRequest::GlideTo { target: to_bevy(x, y.unwrap_or(0.0), z) });
+            }
+            SynthCommand::GlideEscape { away_x, away_z } => {
+                let a = to_bevy(away_x, 0.0, away_z);
+                nav.pending = Some(NavRequest::Glide { away: Vec2::new(a.x, a.z) });
+            }
             SynthCommand::NavSpots { max_cost } => {
                 nav.pending = Some(NavRequest::Spots { max_cost });
             }
@@ -289,6 +300,9 @@ fn drain_commands(
             }
             SynthCommand::Stop => {
                 nav.active = false;
+                if state.grounded {
+                    nav.glide = None;
+                }
                 state.goal = None;
             }
             SynthCommand::Jump => {

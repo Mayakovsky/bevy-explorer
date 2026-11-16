@@ -5,7 +5,7 @@
 //! it, a roof). Moves are the ones a normal player can make: walk, step up at most [`MAX_STEP`], follow a ramp or stairs (a continuous surface
 //! rising at most [`MAX_RAMP_RISE`] per metre), and step or drop off a ledge of at most [`MAX_DROP`] (with a cost). Doorways, stairs and
 //! roofs are not special cases: a doorway is a gap the capsule fits through, stairs and ramps are surfaces that connect levels.
-//! Gliding down from a height is a separate query ([`glide_landings`]): the Synth can glide (8 m/s forward, 3 m/s down), so a high point is an escape.
+//! Gliding down from a height is a separate query ([`glide_to_goal`], [`glide_options`]): the Synth runs off a ledge, opens the glider and flies straight to a lower goal.
 
 use bevy::math::Vec3;
 use std::cmp::Ordering;
@@ -339,54 +339,105 @@ fn simplify(w: &[Waypoint]) -> Vec<Waypoint> {
     out
 }
 
-/// A glide escape: from a standing point `from` at height `from.y` above the ground below, the Synth jumps off and glides (8 m/s forward, 3 m/s
-/// down). For each of `directions` compass bearings, find the farthest straight glide whose path is clear and that lands on a standable surface:
-/// `(landing position, bearing in radians)`. `glide_speed` and `fall_speed` are the engine's.
-pub fn glide_landings<W: NavWorld>(world: &mut W, from: Vec3, directions: usize, glide_speed: f32, fall_speed: f32) -> Vec<(Vec3, f32)> {
+/// A glide: run off a ledge at the starting height, open the glider and fly in a straight line to a landing point, closing the glider above it to
+/// drop the last part. The glider moves `glide_speed` m/s forward and sinks `sink` m/s, so after `d` metres the avatar is `from.y - sink * d / glide_speed`
+/// high; the landing must be a standable surface that the flight reaches from above.
+#[derive(Clone, Copy, Debug)]
+pub struct GlideChoice {
+    /// where the avatar runs off the edge (at the starting height)
+    pub ledge: Vec3,
+    pub landing: Vec3,
+    pub bearing: f32,
+}
+
+/// Is the straight glide from `ledge` to `goal` flyable? The flight altitude at each metre must clear everything (the avatar cylinder at flight height overlaps
+/// nothing) and must still be at or above the goal surface when it arrives (closing the glider drops the rest).
+pub fn glide_clear<W: NavWorld>(world: &mut W, ledge: Vec3, goal: Vec3, glide_speed: f32, sink: f32) -> bool {
+    let d = Vec3::new(goal.x - ledge.x, 0.0, goal.z - ledge.z);
+    let len = d.length();
+    if len < 1.0 {
+        return ledge.y - goal.y >= 0.5;
+    }
+    let dir = d / len;
+    let mut run = 1.0;
+    while run < len {
+        let y = ledge.y - sink * run / glide_speed;
+        let (x, z) = (ledge.x + dir.x * run, ledge.z + dir.z * run);
+        if world.blocked(x, z, y, y + AVATAR_HEIGHT) {
+            return false;
+        }
+        run += 1.0;
+    }
+    // it must still be above the landing surface when it gets there (it can close the glider and drop, but not climb)
+    ledge.y - sink * len / glide_speed >= goal.y - 0.2
+}
+
+/// The first ledge along a bearing from `from`: the distance where the standing surface falls away from the current level (None if there is a wall first
+/// or no edge within `max_run`).
+pub fn find_ledge<W: NavWorld>(world: &mut W, from: Vec3, bearing: f32, max_run: f32) -> Option<f32> {
+    let (dx, dz) = (bearing.cos(), bearing.sin());
+    let mut run = 1.0;
+    while run <= max_run {
+        let (x, z) = (from.x + dx * run, from.z + dz * run);
+        if world.blocked(x, z, from.y + MAX_STEP, from.y + AVATAR_HEIGHT) {
+            return None; // a wall at this level
+        }
+        let top = world.surfaces(x, z, from.y + MAX_STEP).first().copied();
+        if top.map(|t| from.y - t > MAX_STEP + 0.01).unwrap_or(true) {
+            return Some(run);
+        }
+        run += 1.0;
+    }
+    None
+}
+
+/// Glide options from a high standing point: for each of `directions` bearings, the ledge and every landing at the given `distances` (metres from the
+/// ledge) that is a standable surface at least 1 m below the start and reachable by a clear straight glide.
+pub fn glide_options<W: NavWorld>(world: &mut W, from: Vec3, directions: usize, distances: &[f32], glide_speed: f32, sink: f32) -> Vec<GlideChoice> {
     let mut out = Vec::new();
     for k in 0..directions {
         let a = k as f32 / directions as f32 * std::f32::consts::TAU;
-        let (dx, dz) = (a.cos(), a.sin());
-        // run along the bearing to the ledge: the first metre where the standing surface falls away from the current level
-        let mut ledge: Option<f32> = None;
-        let mut run = 1.0;
-        while run <= 40.0 {
-            let (x, z) = (from.x + dx * run, from.z + dz * run);
-            if world.blocked(x, z, from.y + MAX_STEP, from.y + AVATAR_HEIGHT) {
-                break; // a wall at this level: nowhere to run off from this way
+        let Some(start) = find_ledge(world, from, a, 40.0) else { continue };
+        let ledge = Vec3::new(from.x + a.cos() * start, from.y, from.z + a.sin() * start);
+        for &dist in distances {
+            let (x, z) = (ledge.x + a.cos() * dist, ledge.z + a.sin() * dist);
+            let flight_y = from.y - sink * dist / glide_speed;
+            // the standable surface the flight lands on: the highest one under the flight height that is also well below the start
+            let Some(s) = world.surfaces(x, z, flight_y + 0.2).into_iter().find(|s| from.y - *s >= 1.0 && !world.blocked(x, z, *s + MAX_STEP, *s + AVATAR_HEIGHT)) else { continue };
+            let goal = Vec3::new(x, s, z);
+            if glide_clear(world, ledge, goal, glide_speed, sink) {
+                out.push(GlideChoice { ledge, landing: goal, bearing: a });
             }
-            let top = world.surfaces(x, z, from.y + MAX_STEP).first().copied();
-            if top.map(|t| from.y - t > MAX_STEP + 0.01).unwrap_or(true) {
-                ledge = Some(run);
-                break;
-            }
-            run += 1.0;
-        }
-        let Some(start) = ledge else { continue };
-        // jump off at the ledge and glide: at distance d past it the avatar is at height from.y - fall * d / glide_speed
-        let mut best: Option<Vec3> = None;
-        let mut dist = 1.0;
-        while dist < 400.0 {
-            let t = dist / glide_speed;
-            let y = from.y - fall_speed * t;
-            let (x, z) = (from.x + dx * (start + dist), from.z + dz * (start + dist));
-            if world.blocked(x, z, y.max(0.0), y.max(0.0) + AVATAR_HEIGHT) && world.surfaces(x, z, y + 0.5).first().map(|s| y - *s > 1.0).unwrap_or(true) {
-                break; // flew into something before reaching a surface to land on
-            }
-            // land on the first standable surface at or just under the flight height
-            if let Some(s) = world.surfaces(x, z, y + 0.5).first() {
-                if y - *s < 1.0 && !world.blocked(x, z, *s + MAX_STEP, *s + AVATAR_HEIGHT) {
-                    best = Some(Vec3::new(x, *s, z));
-                    break;
-                }
-            }
-            dist += 2.0;
-        }
-        if let Some(b) = best {
-            out.push((b, a));
         }
     }
     out
+}
+
+/// A goal-directed glide (`glide_to`): the Synth is on a high spot and wants to reach `goal`, a lower standable point. Try the bearing towards the goal and
+/// a few either side for a ledge from which the straight glide to the goal is clear; None = it cannot get there by gliding (the caller walks instead).
+pub fn glide_to_goal<W: NavWorld>(world: &mut W, from: Vec3, goal: Vec3, glide_speed: f32, sink: f32) -> Option<GlideChoice> {
+    if from.y - goal.y < 1.0 {
+        return None;
+    }
+    let toward = (goal.z - from.z).atan2(goal.x - from.x);
+    let mut tried: Vec<f32> = vec![0.0];
+    for deg in [15.0f32, 30.0, 45.0, 70.0, 90.0] {
+        tried.push(deg.to_radians());
+        tried.push(-deg.to_radians());
+    }
+    let mut best: Option<(f32, GlideChoice)> = None;
+    for off in tried {
+        let a = toward + off;
+        let Some(run) = find_ledge(world, from, a, 40.0) else { continue };
+        let ledge = Vec3::new(from.x + a.cos() * run, from.y, from.z + a.sin() * run);
+        if glide_clear(world, ledge, goal, glide_speed, sink) {
+            let cost = run + off.abs() * 10.0; // short run, small detour
+            if best.map(|(c, _)| cost < c).unwrap_or(true) {
+                best = Some((cost, GlideChoice { ledge, landing: goal, bearing: a }));
+            }
+        }
+    }
+    best.map(|(_, c)| c)
 }
 
 #[cfg(test)]

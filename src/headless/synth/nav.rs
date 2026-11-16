@@ -7,14 +7,14 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 use common::{
-    nav::{NavWorld, PlanConfig, PlanError, Planner, Waypoint, Move, AVATAR_RADIUS},
+    nav::{glide_options, glide_to_goal, GlideChoice, NavWorld, PlanConfig, PlanError, Planner, Waypoint, Move, AVATAR_RADIUS},
     structs::PrimaryUser,
 };
 use dcl_component::proto_components::sdk::components::ColliderLayer;
 use scene_runner::update_world::mesh_collider::{SceneColliderData, GROUND_COLLISION_MASK};
 use serde_json::json;
 
-use super::{dcl_position, emit, to_bevy, Goal, SynthState};
+use super::{dcl_position, emit, to_bevy, Goal, SynthState, GLIDE_FALL, GLIDE_SPEED};
 use crate::headless::landscape::Landscape;
 
 const MASK: u32 = ColliderLayer::ClPhysics as u32 | GROUND_COLLISION_MASK;
@@ -27,6 +27,25 @@ const GIVE_UP_SECS: f32 = 150.0;
 pub enum NavRequest {
     To { target: Vec3, level: bool, run: bool },
     Spots { max_cost: f32 },
+    /// Glide off a high place away from a threat at `away` (bevy x/z).
+    Glide { away: Vec2 },
+    /// Glide from here to a lower goal (bevy position); fails cleanly when it cannot be reached by gliding.
+    GlideTo { target: Vec3 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GlidePhase {
+    Run,
+    Takeoff,
+    Air,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GlideRun {
+    pub choice: GlideChoice,
+    pub phase: GlidePhase,
+    pub since: f32,
+    pub airborne_since: Option<f32>,
 }
 
 #[derive(Resource, Default)]
@@ -44,6 +63,7 @@ pub struct Nav {
     pub id: u32,
     /// the walk goal was set by us last frame (so a missing goal now means the movement system dropped it: blocked)
     pub just_set: bool,
+    pub glide: Option<GlideRun>,
 }
 
 struct EngineWorld<'a, 'b> {
@@ -84,6 +104,17 @@ fn dcl_list(path: &[Waypoint]) -> Vec<serde_json::Value> {
             json!({"x": (p[0] * 100.0).round() / 100.0, "y": (p[1] * 100.0).round() / 100.0, "z": (p[2] * 100.0).round() / 100.0, "how": format!("{:?}", w.how).to_lowercase()})
         })
         .collect()
+}
+
+fn start_glide(nav: &mut Nav, choice: Option<GlideChoice>, options: usize, from: Vec3, ms: u64, now: f32, kind: &str) {
+    match choice {
+        Some(choice) => {
+            emit(json!({"event": "glide", "status": "planned", "kind": kind, "options": options, "from": dcl_position(from), "ledge": dcl_position(choice.ledge), "landing": dcl_position(choice.landing), "height": from.y - choice.landing.y, "ms": ms}));
+            nav.active = false;
+            nav.glide = Some(GlideRun { choice, phase: GlidePhase::Run, since: now, airborne_since: None });
+        }
+        None => emit(json!({"event": "glide", "status": "failed", "kind": kind, "reason": "no_glide", "options": options, "from": dcl_position(from), "ms": ms})),
+    }
 }
 
 pub fn nav_plan(
@@ -134,6 +165,19 @@ pub fn nav_plan(
                     nav.active = false;
                 }
             }
+        }
+        NavRequest::Glide { away } => {
+            let choices = glide_options(&mut world, from, 16, &[12.0, 20.0, 30.0, 45.0, 60.0], GLIDE_SPEED, GLIDE_FALL);
+            let ms = t0.elapsed().as_millis() as u64;
+            // the landing farthest from the threat, then the shortest run to the ledge
+            let score = |a: &GlideChoice| Vec2::new(a.landing.x - away.x, a.landing.z - away.y).length() - 0.4 * Vec2::new(a.ledge.x - from.x, a.ledge.z - from.z).length();
+            let best = choices.iter().copied().max_by(|a, b| score(a).partial_cmp(&score(b)).unwrap_or(std::cmp::Ordering::Equal));
+            start_glide(&mut nav, best, choices.len(), from, ms, time.elapsed_secs(), "escape");
+        }
+        NavRequest::GlideTo { target } => {
+            let choice = glide_to_goal(&mut world, from, target, GLIDE_SPEED, GLIDE_FALL);
+            let ms = t0.elapsed().as_millis() as u64;
+            start_glide(&mut nav, choice, usize::from(choice.is_some()), from, ms, time.elapsed_secs(), "to");
         }
         NavRequest::Spots { max_cost } => {
             let cells = Planner::new(&mut world).reachable(from, max_cost, &cfg());
@@ -229,4 +273,71 @@ pub fn nav_follow(
     state.goal = Some(Goal { target: wp.pos, run: nav.run });
     state.facing = None;
     nav.just_set = true;
+}
+
+/// Run to the ledge, jump, open the glider and steer to the landing.
+pub fn glide_follow(mut nav: ResMut<Nav>, mut state: ResMut<SynthState>, player: Query<&Transform, With<PrimaryUser>>, time: Res<Time>) {
+    let Some(mut g) = nav.glide else { return };
+    let Ok(transform) = player.single() else { return };
+    let pos = transform.translation;
+    let now = time.elapsed_secs();
+    let fail = |nav: &mut Nav, state: &mut SynthState, why: &str, pos: Vec3| {
+        nav.glide = None;
+        state.goal = None;
+        state.glide = false;
+        emit(json!({"event": "glide", "status": "failed", "reason": why, "position": dcl_position(pos)}));
+    };
+    if now - g.since > 40.0 {
+        return fail(&mut nav, &mut state, "timeout", pos);
+    }
+    match g.phase {
+        GlidePhase::Run => {
+            let dh = Vec2::new(g.choice.ledge.x - pos.x, g.choice.ledge.z - pos.z).length();
+            if dh < 0.8 {
+                g.phase = GlidePhase::Takeoff;
+                g.since = now;
+                state.goal = None;
+            } else if state.goal.is_none() && now - g.since > 1.0 {
+                // blocked on the way: re-issue the run once
+                state.goal = Some(Goal { target: Vec3::new(g.choice.ledge.x, pos.y, g.choice.ledge.z), run: true });
+            } else {
+                state.goal = Some(Goal { target: Vec3::new(g.choice.ledge.x, pos.y, g.choice.ledge.z), run: true });
+            }
+            state.facing = None;
+        }
+        GlidePhase::Takeoff => {
+            if state.grounded {
+                state.jump_requested = true;
+                if now - g.since > 2.0 {
+                    nav.glide = Some(g);
+                    return fail(&mut nav, &mut state, "no_takeoff", pos);
+                }
+            } else {
+                g.phase = GlidePhase::Air;
+                g.airborne_since = Some(now);
+            }
+        }
+        GlidePhase::Air => {
+            if !state.glide {
+                state.glide_requested = true;
+            }
+            let to_landing = Vec2::new(g.choice.landing.x - pos.x, g.choice.landing.z - pos.z).length();
+            if to_landing < 1.5 {
+                // above the landing: close the glider and drop the rest
+                state.glide = false;
+                state.glide_requested = false;
+                state.goal = None;
+            } else {
+                state.goal = Some(Goal { target: Vec3::new(g.choice.landing.x, pos.y, g.choice.landing.z), run: true });
+            }
+            let up = g.airborne_since.map(|t| now - t).unwrap_or(0.0);
+            if state.grounded && up > 0.6 {
+                nav.glide = None;
+                state.goal = None;
+                emit(json!({"event": "glide", "status": "landed", "position": dcl_position(pos), "planned": dcl_position(g.choice.landing), "seconds": up}));
+                return;
+            }
+        }
+    }
+    nav.glide = Some(g);
 }
