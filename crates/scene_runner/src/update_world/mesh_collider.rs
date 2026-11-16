@@ -1004,6 +1004,28 @@ impl SceneColliderData {
             .collect()
     }
 
+    /// Emanate navigation: heights of the upward-facing surfaces under `(x, z)` at or below `from_y`, highest first. `min_normal_y` is the least
+    /// vertical component of a walkable surface's normal (0.5 = about 60 degrees).
+    pub fn surfaces_below(&mut self, x: f32, z: f32, from_y: f32, mask: u32, min_normal_y: f32) -> Vec<f32> {
+        let mut ys: Vec<f32> = self
+            .cast_ray_all(Vec3::new(x, from_y, z), -Vec3::Y, 2000.0, mask, false)
+            .into_iter()
+            .filter(|h| h.normal.y >= min_normal_y)
+            .map(|h| h.position.y)
+            .collect();
+        ys.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        ys
+    }
+
+    /// Emanate navigation: does a vertical cylinder of `radius` at `(x, z)` spanning heights `y0..y1` overlap a collider on `mask`?
+    pub fn cylinder_blocked(&mut self, x: f32, z: f32, y0: f32, y1: f32, radius: f32, mask: u32) -> bool {
+        let half = f64::from((y1 - y0) * 0.5).max(0.01);
+        let collider = ColliderBuilder::cylinder(half, f64::from(radius))
+            .translation(DVec3::new(f64::from(x), f64::from((y0 + y1) * 0.5), f64::from(z)).into())
+            .build();
+        !self.intersect_collider(&collider, mask).is_empty()
+    }
+
     pub fn intersect_id(&mut self, id: &ColliderId, mask: u32) -> Vec<ColliderId> {
         self.update_bvh();
         let Some(collider) = self.get_collider(id) else {

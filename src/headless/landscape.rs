@@ -20,7 +20,7 @@ use dcl_component::proto_components::sdk::components::ColliderLayer;
 use scene_runner::update_world::mesh_collider::{ColliderId, GlobalGroundCollider, SceneColliderData, SharedShape, GROUND_COLLISION_MASK};
 
 /// Side of the ground patch in metres (1 m spacing) and the grid it recentres on, as the full client does.
-const PATCH: i32 = 64;
+const PATCH: i32 = 128;
 const RECENTRE: f32 = 16.0;
 /// Rocks are built over the patch plus this margin so one is never cut in half at the edge.
 const MARGIN: f32 = 8.0;
@@ -30,9 +30,21 @@ pub struct LandscapePlugin {
 }
 
 #[derive(Resource)]
-struct Landscape {
+pub(super) struct Landscape {
     terrain: UnityTerrain,
     props: GenesisProps,
+}
+
+impl Landscape {
+    /// Unity's ground height under a Bevy x/z on an empty parcel (None on an occupied parcel or outside the terrain): navigation uses it beyond the collider patch.
+    pub(super) fn ground(&self, x: f32, bevy_z: f32) -> Option<f32> {
+        let parcel = IVec2::new((x / PARCEL).floor() as i32, (-bevy_z / PARCEL).floor() as i32);
+        if self.terrain.is_occupied(parcel) {
+            None
+        } else {
+            Some(self.terrain.height(x, -bevy_z))
+        }
+    }
 }
 
 #[derive(Component, Default)]

@@ -4,6 +4,7 @@ pub mod bounds_calc;
 pub mod dynamics;
 pub mod genesis_props;
 pub mod inputs;
+pub mod nav;
 pub mod profile;
 pub mod rpc;
 pub mod sets;

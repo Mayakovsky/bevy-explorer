@@ -16,6 +16,8 @@
 //! Pulse position broadcast are the engine's own. The channel is stdin (not a socket) because the
 //! orchestrator spawns this process and already owns its pipes.
 
+mod nav;
+use nav::{nav_follow, nav_plan, Nav, NavRequest};
 use std::sync::{mpsc, Mutex};
 
 use bevy::prelude::*;
@@ -72,6 +74,20 @@ pub enum SynthCommand {
     WalkTo { x: f32, y: Option<f32>, z: f32 },
     /// Same at run speed.
     RunTo { x: f32, y: Option<f32>, z: f32 },
+    /// Emanate: walk (or `run`) to a world position along a planned route around buildings, through doorways, up stairs and ramps (`y` picks a level:
+    /// a floor or a roof). Events: `nav` planned / failed / arrived / replanning / stuck.
+    NavTo {
+        x: f32,
+        y: Option<f32>,
+        z: f32,
+        #[serde(default)]
+        run: bool,
+    },
+    /// Emanate: list the spots reachable within `max_cost` metres of walking (`nav_spots` event), for choosing where to hide.
+    NavSpots {
+        #[serde(default = "default_spot_cost")]
+        max_cost: f32,
+    },
     /// Abandon the current walk/run target.
     Stop,
     /// Ground: takeoff. In the air: DCL's sequence, first press = double jump, second = open the
@@ -102,6 +118,8 @@ pub enum SynthCommand {
     Chat { text: String },
     /// Republish the profile with a new display name.
     SayProfile { name: String },
+    /// Emanate: set the worn items (base-avatar wearable URNs, free only) and republish the profile.
+    Wear { items: Vec<String> },
     /// Start (`on` true, the default) or stop streaming `track` events: every 0.2 s, each visible
     /// player's position and finite-difference velocity as this client receives it over Pulse.
     Track {
@@ -115,6 +133,10 @@ pub enum SynthCommand {
 
 fn yes() -> bool {
     true
+}
+
+fn default_spot_cost() -> f32 {
+    120.0
 }
 
 #[derive(Resource)]
@@ -162,10 +184,11 @@ impl Plugin for SynthPlugin {
         app.insert_resource(SynthChannel(Mutex::new(spawn_stdin_reader())))
             .init_resource::<SynthState>()
             .init_resource::<SynthBroadcastOverride>()
+            .init_resource::<Nav>()
             .add_systems(Startup, announce)
             .add_systems(
                 Update,
-                (release_profile_deploy, drain_commands, drive, emit_chat, track_players)
+                (release_profile_deploy, drain_commands, nav_plan, nav_follow, drive, emit_chat, track_players)
                     .chain()
                     // after the engine picked the active AvatarMovement for this frame, before the
                     // PostUpdate movement pipeline applies it
@@ -230,6 +253,7 @@ fn drain_commands(
     mut chat: EventWriter<ChatEvent>,
     player_res: Res<PrimaryPlayerRes>,
     foreign: Query<(&ForeignPlayer, &Transform, Option<&UserProfile>)>,
+    mut nav: ResMut<Nav>,
 ) {
     let Ok(rx) = channel.0.lock() else { return };
     while let Ok(command) = rx.try_recv() {
@@ -238,7 +262,15 @@ fn drain_commands(
             continue;
         };
         match command {
+            SynthCommand::NavTo { x, y, z, run } => {
+                nav.replans = 0;
+                nav.pending = Some(NavRequest::To { target: to_bevy(x, y.unwrap_or(0.0), z), level: y.is_some(), run });
+            }
+            SynthCommand::NavSpots { max_cost } => {
+                nav.pending = Some(NavRequest::Spots { max_cost });
+            }
             SynthCommand::WalkTo { x, y, z } => {
+                nav.active = false;
                 state.goal = Some(Goal {
                     target: to_bevy(x, y.unwrap_or(0.0), z),
                     run: false,
@@ -247,6 +279,7 @@ fn drain_commands(
                 state.blocked_secs = 0.0;
             }
             SynthCommand::RunTo { x, y, z } => {
+                nav.active = false;
                 state.goal = Some(Goal {
                     target: to_bevy(x, y.unwrap_or(0.0), z),
                     run: true,
@@ -254,7 +287,10 @@ fn drain_commands(
                 state.facing = None;
                 state.blocked_secs = 0.0;
             }
-            SynthCommand::Stop => state.goal = None,
+            SynthCommand::Stop => {
+                nav.active = false;
+                state.goal = None;
+            }
             SynthCommand::Jump => {
                 if state.grounded {
                     state.jump_requested = true;
@@ -354,6 +390,18 @@ fn drain_commands(
                     p.content.name = name.clone();
                     profile.is_deployed = false;
                     emit(json!({"event": "profile", "name": name}));
+                } else {
+                    emit(json!({"event": "error", "error": "no profile yet"}));
+                }
+            }
+            SynthCommand::Wear { items } => {
+                if let Some(p) = profile.profile.as_mut() {
+                    p.version += 1;
+                    p.content.version = p.version as i64;
+                    p.content.avatar.wearables = items.clone();
+                    let v = p.version;
+                    profile.is_deployed = false;
+                    emit(json!({"event": "wear", "items": items, "profile_version": v}));
                 } else {
                     emit(json!({"event": "error", "error": "no profile yet"}));
                 }

@@ -1,0 +1,232 @@
+//! Emanate: the Synth walks real routes. `nav_to` plans a path over the colliders the engine has loaded (scenes plus the landscape; see
+//! `common::nav`) and follows it waypoint by waypoint through the normal movement physics, jumping at stairs and replanning when blocked.
+//! `nav_spots` lists the spots the Synth can reach (for the server's hiding choices: high or low, near or far).
+//! Events: `nav` ({"status": "planned"|"failed"|"arrived"|"stuck"|"replanning"}) and `nav_spots`.
+
+use std::time::Instant;
+
+use bevy::prelude::*;
+use common::{
+    nav::{NavWorld, PlanConfig, PlanError, Planner, Waypoint, Move, AVATAR_RADIUS},
+    structs::PrimaryUser,
+};
+use dcl_component::proto_components::sdk::components::ColliderLayer;
+use scene_runner::update_world::mesh_collider::{SceneColliderData, GROUND_COLLISION_MASK};
+use serde_json::json;
+
+use super::{dcl_position, emit, to_bevy, Goal, SynthState};
+use crate::headless::landscape::Landscape;
+
+const MASK: u32 = ColliderLayer::ClPhysics as u32 | GROUND_COLLISION_MASK;
+/// A waypoint counts as reached within this horizontal distance (the last one: the arrive radius of the walk goal).
+const REACH: f32 = 0.9;
+const MAX_REPLANS: u32 = 4;
+const GIVE_UP_SECS: f32 = 150.0;
+
+#[derive(Clone, Debug)]
+pub enum NavRequest {
+    To { target: Vec3, level: bool, run: bool },
+    Spots { max_cost: f32 },
+}
+
+#[derive(Resource, Default)]
+pub struct Nav {
+    pub pending: Option<NavRequest>,
+    pub path: Vec<Waypoint>,
+    pub idx: usize,
+    pub run: bool,
+    pub goal: Option<(Vec3, bool)>, // target and whether the y counts
+    pub active: bool,
+    pub replans: u32,
+    pub blocks_here: u32,
+    pub last_jump: f32,
+    pub started: f32,
+    pub id: u32,
+    /// the walk goal was set by us last frame (so a missing goal now means the movement system dropped it: blocked)
+    pub just_set: bool,
+}
+
+struct EngineWorld<'a, 'b> {
+    scenes: &'a mut Vec<Mut<'b, SceneColliderData>>,
+    landscape: Option<&'a Landscape>,
+}
+
+impl NavWorld for EngineWorld<'_, '_> {
+    fn surfaces(&mut self, x: f32, z: f32, from_y: f32) -> Vec<f32> {
+        let top = from_y.min(900.0);
+        let mut ys: Vec<f32> = Vec::new();
+        for s in self.scenes.iter_mut() {
+            ys.extend(s.surfaces_below(x, z, top, MASK, 0.5));
+        }
+        if let Some(g) = self.landscape.and_then(|l| l.ground(x, z)) {
+            if g <= top {
+                ys.push(g);
+            }
+        }
+        ys.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        ys.dedup_by(|a, b| (*a - *b).abs() < 0.12);
+        ys
+    }
+    fn blocked(&mut self, x: f32, z: f32, y0: f32, y1: f32) -> bool {
+        self.scenes.iter_mut().any(|s| s.cylinder_blocked(x, z, y0, y1, AVATAR_RADIUS, MASK))
+    }
+}
+
+fn cfg() -> PlanConfig {
+    PlanConfig { radius_cells: 70, max_nodes: 14_000, goal_tolerance: 1.2, ..Default::default() }
+}
+
+fn dcl_list(path: &[Waypoint]) -> Vec<serde_json::Value> {
+    path.iter()
+        .take(80)
+        .map(|w| {
+            let p = dcl_position(w.pos);
+            json!({"x": (p[0] * 100.0).round() / 100.0, "y": (p[1] * 100.0).round() / 100.0, "z": (p[2] * 100.0).round() / 100.0, "how": format!("{:?}", w.how).to_lowercase()})
+        })
+        .collect()
+}
+
+pub fn nav_plan(
+    mut nav: ResMut<Nav>,
+    mut scenes: Query<&mut SceneColliderData>,
+    landscape: Option<Res<Landscape>>,
+    player: Query<&Transform, With<PrimaryUser>>,
+    time: Res<Time>,
+) {
+    let Some(request) = nav.pending.take() else { return };
+    let Ok(transform) = player.single() else {
+        emit(json!({"event": "nav", "status": "failed", "reason": "player not ready"}));
+        return;
+    };
+    let from = transform.translation;
+    let mut guards: Vec<Mut<SceneColliderData>> = scenes.iter_mut().collect();
+    let mut world = EngineWorld { scenes: &mut guards, landscape: landscape.as_deref() };
+    let t0 = Instant::now();
+    match request {
+        NavRequest::To { target, level, run } => {
+            let result = Planner::new(&mut world).plan(from, target, level, &cfg());
+            let ms = t0.elapsed().as_millis() as u64;
+            match result {
+                Ok(plan) => {
+                    let mut wps = plan.waypoints;
+                    if wps.len() > 1 && Vec2::new(wps[0].pos.x - from.x, wps[0].pos.z - from.z).length() < REACH {
+                        wps.remove(0);
+                    }
+                    nav.id += 1;
+                    emit(json!({"event": "nav", "status": if nav.replans > 0 { "replanned" } else { "planned" }, "id": nav.id, "waypoints": dcl_list(&wps), "count": wps.len(), "cost": plan.cost, "expanded": plan.expanded, "ms": ms}));
+                    nav.path = wps;
+                    nav.idx = 0;
+                    nav.run = run;
+                    nav.goal = Some((target, level));
+                    nav.active = true;
+                    nav.blocks_here = 0;
+                    if nav.replans == 0 {
+                        nav.started = time.elapsed_secs();
+                    }
+                }
+                Err(e) => {
+                    let reason = match e {
+                        PlanError::NoStart => "no_start".to_string(),
+                        PlanError::NoGoal => "no_goal".to_string(),
+                        PlanError::NoPath { expanded } => format!("no_path (searched {expanded})"),
+                    };
+                    emit(json!({"event": "nav", "status": "failed", "reason": reason, "ms": ms}));
+                    nav.active = false;
+                }
+            }
+        }
+        NavRequest::Spots { max_cost } => {
+            let cells = Planner::new(&mut world).reachable(from, max_cost, &cfg());
+            let ms = t0.elapsed().as_millis() as u64;
+            // one spot per 3 m square, the cheapest in it, so the list stays a few hundred
+            let mut best: std::collections::HashMap<(i32, i32, i32), (Vec3, f32)> = std::collections::HashMap::new();
+            for (p, c) in cells {
+                let key = ((p.x / 3.0).floor() as i32, (p.z / 3.0).floor() as i32, (p.y / 1.5).floor() as i32);
+                let e = best.entry(key).or_insert((p, c));
+                if c < e.1 {
+                    *e = (p, c);
+                }
+            }
+            let mut spots: Vec<_> = best.into_values().collect();
+            spots.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            spots.truncate(700);
+            let list: Vec<_> = spots
+                .iter()
+                .map(|(p, c)| {
+                    let d = dcl_position(*p);
+                    json!({"x": (d[0] * 10.0).round() / 10.0, "y": (d[1] * 10.0).round() / 10.0, "z": (d[2] * 10.0).round() / 10.0, "cost": (c * 10.0).round() / 10.0})
+                })
+                .collect();
+            emit(json!({"event": "nav_spots", "count": list.len(), "from": dcl_position(from), "spots": list, "ms": ms}));
+        }
+    }
+}
+
+pub fn nav_follow(
+    mut nav: ResMut<Nav>,
+    mut state: ResMut<SynthState>,
+    player: Query<&Transform, With<PrimaryUser>>,
+    time: Res<Time>,
+) {
+    if !nav.active {
+        return;
+    }
+    let Ok(transform) = player.single() else { return };
+    let pos = transform.translation;
+    let now = time.elapsed_secs();
+    if now - nav.started > GIVE_UP_SECS {
+        nav.active = false;
+        state.goal = None;
+        emit(json!({"event": "nav", "status": "stuck", "reason": "timeout", "position": dcl_position(pos)}));
+        return;
+    }
+    while nav.idx < nav.path.len() {
+        let wp = nav.path[nav.idx];
+        let last = nav.idx + 1 == nav.path.len();
+        let dh = Vec2::new(wp.pos.x - pos.x, wp.pos.z - pos.z).length();
+        if dh < if last { 0.6 } else { REACH } {
+            nav.idx += 1;
+            nav.blocks_here = 0;
+        } else {
+            break;
+        }
+    }
+    if nav.idx >= nav.path.len() {
+        nav.active = false;
+        nav.replans = 0;
+        state.goal = None;
+        emit(json!({"event": "nav", "status": "arrived", "position": dcl_position(pos)}));
+        return;
+    }
+    let wp = nav.path[nav.idx];
+    let dh = Vec2::new(wp.pos.x - pos.x, wp.pos.z - pos.z).length();
+    // blocked by the movement system (it cleared the goal): jump first, then replan
+    if state.goal.is_none() && nav.just_set {
+        nav.blocks_here += 1;
+        if nav.blocks_here <= 2 && state.grounded {
+            state.jump_requested = true;
+            nav.last_jump = now;
+        } else if nav.replans < MAX_REPLANS {
+            nav.replans += 1;
+            emit(json!({"event": "nav", "status": "replanning", "attempt": nav.replans, "position": dcl_position(pos)}));
+            if let Some((t, level)) = nav.goal {
+                nav.pending = Some(NavRequest::To { target: t, level, run: nav.run });
+            }
+            nav.just_set = false;
+            return;
+        } else {
+            nav.active = false;
+            nav.replans = 0;
+            emit(json!({"event": "nav", "status": "stuck", "reason": "blocked", "position": dcl_position(pos)}));
+            return;
+        }
+    }
+    // stairs: a rise the capsule cannot slide over is jumped
+    if wp.how == Move::Climb && wp.pos.y - pos.y > 0.15 && state.grounded && dh < 1.5 && now - nav.last_jump > 0.7 {
+        state.jump_requested = true;
+        nav.last_jump = now;
+    }
+    state.goal = Some(Goal { target: wp.pos, run: nav.run });
+    state.facing = None;
+    nav.just_set = true;
+}
