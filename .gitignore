@@ -31,3 +31,16 @@ node_modules/
 
 # headless npm packaging build output
 /deploy/headless/dist
+
+# local-only and sensitive material (EMANATE-PUSH-POLICY): never in this repo
+/deploy/vps/
+/halo-upload/
+/data/
+/emanate-data/
+GenesisTrees.bin
+.env
+.env.*
+*.token
+*secret*
+*.key
+*.zip
