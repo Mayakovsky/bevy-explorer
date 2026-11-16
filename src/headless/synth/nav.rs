@@ -64,6 +64,8 @@ pub struct Nav {
     /// the walk goal was set by us last frame (so a missing goal now means the movement system dropped it: blocked)
     pub just_set: bool,
     pub glide: Option<GlideRun>,
+    /// the Synth's power level (set by the `level` command): the planner's jumping moves depend on it
+    pub level: u8,
 }
 
 struct EngineWorld<'a, 'b> {
@@ -92,8 +94,9 @@ impl NavWorld for EngineWorld<'_, '_> {
     }
 }
 
-fn cfg() -> PlanConfig {
-    PlanConfig { radius_cells: 70, max_nodes: 14_000, goal_tolerance: 1.2, ..Default::default() }
+/// planner limits at a power level: the highest ledge a jump gets up onto is about 1.4 m normally and about 5.5 m with the Jump level's double jump (measured: its peak is 6.7 m, not the 9 m the players set)
+fn cfg(level: u8) -> PlanConfig {
+    PlanConfig { radius_cells: 70, max_nodes: 30_000, goal_tolerance: 1.2, jump_rise: if level >= 2 { 5.5 } else { 1.4 }, ..Default::default() }
 }
 
 fn dcl_list(path: &[Waypoint]) -> Vec<serde_json::Value> {
@@ -135,7 +138,7 @@ pub fn nav_plan(
     let t0 = Instant::now();
     match request {
         NavRequest::To { target, level, run } => {
-            let result = Planner::new(&mut world).plan(from, target, level, &cfg());
+            let result = Planner::new(&mut world).plan(from, target, level, &cfg(nav.level));
             let ms = t0.elapsed().as_millis() as u64;
             match result {
                 Ok(plan) => {
@@ -181,7 +184,7 @@ pub fn nav_plan(
         }
         NavRequest::Spots { max_cost } => {
             // the spot list reaches farther than a route plan does (a long run, up to about 100 m, needs spots near the top of its budget)
-            let spot_cfg = PlanConfig { radius_cells: 105, max_nodes: 30_000, ..cfg() };
+            let spot_cfg = PlanConfig { radius_cells: 105, max_nodes: 30_000, ..cfg(nav.level) };
             let cells = Planner::new(&mut world).reachable(from, max_cost, &spot_cfg);
             let ms = t0.elapsed().as_millis() as u64;
             // one spot per square, the cheapest in it: 3 m squares near the Synth, 6 m squares from 30 m of walking, 10 m squares from 70 m, so the list reaches the
@@ -267,6 +270,16 @@ pub fn nav_follow(
             nav.replans = 0;
             emit(json!({"event": "nav", "status": "stuck", "reason": "blocked", "position": dcl_position(pos)}));
             return;
+        }
+    }
+    // a jump move: up onto a ledge or platform: jump near the foot of it, and with the Jump level's double jump near the top of the first jump
+    if wp.how == Move::Jump {
+        let rise = wp.pos.y - pos.y;
+        if rise > 0.15 && state.grounded && dh < 2.0 && now - nav.last_jump > 0.7 {
+            state.jump_requested = true;
+            nav.last_jump = now;
+        } else if !state.grounded && state.air_jumps == 0 && rise > 1.4 && state.vy < 3.0 {
+            state.double_jump_requested = true;
         }
     }
     // stairs: a rise the capsule cannot slide over is jumped

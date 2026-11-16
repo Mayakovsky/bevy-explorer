@@ -234,3 +234,40 @@ fn a_level_goal_that_lands_on_another_level_fails_instead_of_ending_on_the_groun
     // the same goal without a level (any height) still plans
     assert!(plan(&mut w, Vec3::new(0.5, 0.0, 0.5), Vec3::new(10.5, 6.0, 0.5), false).is_ok());
 }
+
+#[test]
+fn jumping_moves_reach_ledges_a_walking_plan_cannot() {
+    // a 1.3 m block with no ramp: only a jump gets onto it
+    let mut w = World { boxes: vec![B(10.0, 14.0, -2.0, 2.0, 0.0, 1.3)] };
+    let walk = PlanConfig::default();
+    let jump = PlanConfig { jump_rise: 1.4, ..PlanConfig::default() };
+    let from = Vec3::new(0.5, 0.0, 0.5);
+    let to = Vec3::new(12.5, 1.3, 0.5);
+    assert!(matches!(Planner::new(&mut w).plan(from, to, true, &walk), Err(PlanError::NoPath { .. }) | Err(PlanError::NoGoal)), "no jump, no route");
+    let p = Planner::new(&mut w).plan(from, to, true, &jump).expect("a jump reaches it");
+    assert!(p.waypoints.iter().any(|wp| wp.how == Move::Jump), "the route includes a jump");
+    assert!((p.waypoints.last().unwrap().pos.y - 1.3).abs() < 0.1);
+}
+
+#[test]
+fn a_tall_platform_needs_the_double_jump_range() {
+    let mut w = World { boxes: vec![B(10.0, 14.0, -2.0, 2.0, 0.0, 7.5)] };
+    let normal = PlanConfig { jump_rise: 1.4, ..PlanConfig::default() };
+    let level2 = PlanConfig { jump_rise: 8.0, ..PlanConfig::default() };
+    let from = Vec3::new(0.5, 0.0, 0.5);
+    let to = Vec3::new(12.5, 7.5, 0.5);
+    assert!(Planner::new(&mut w).plan(from, to, true, &normal).is_err());
+    let p = Planner::new(&mut w).plan(from, to, true, &level2).expect("the double jump reaches a 7.5 m platform");
+    assert!(p.waypoints.iter().any(|wp| wp.how == Move::Jump));
+}
+
+#[test]
+fn the_reachable_spot_list_grows_with_the_jump_range() {
+    let mut w = World { boxes: vec![B(10.0, 14.0, -2.0, 2.0, 0.0, 6.0)] };
+    let n = |w: &mut World, rise: f32| {
+        let cfg = PlanConfig { jump_rise: rise, ..PlanConfig::default() };
+        Planner::new(w).reachable(Vec3::new(0.5, 0.0, 0.5), 60.0, &cfg).iter().filter(|(p, _)| p.y > 5.0).count()
+    };
+    assert_eq!(n(&mut w, 1.4), 0);
+    assert!(n(&mut w, 8.0) > 0);
+}

@@ -59,6 +59,28 @@ const GLIDE_SPEED: f32 = 8.0;
 const EMOTE_DURATION_MS: u32 = 3000;
 /// In-air second jump height (m), a little under DCL's double-jump.
 const DOUBLE_JUMP_HEIGHT: f32 = 1.5;
+
+// controls v1 (the numbers the players' halo sets for its tiers): level 1 Speed, level 2 Jump (and 3 Fly, which the Synth cannot fly yet)
+const LV_WALK_SPEED: f32 = 5.0;
+const LV_RUN_SPEED: f32 = 16.2;
+const LV_JUMP_HEIGHT: f32 = 1.6;
+const LV_RUN_JUMP_HEIGHT: f32 = 2.2;
+const LV_DOUBLE_JUMP_HEIGHT: f32 = 9.0;
+
+/// run speed at a level
+fn level_run_speed(level: u8, normal: f32) -> f32 {
+    if level >= 1 { LV_RUN_SPEED } else { normal }
+}
+fn level_walk_speed(level: u8, normal: f32) -> f32 {
+    if level >= 1 { LV_WALK_SPEED } else { normal }
+}
+/// standing jump height; a running jump (level 2 and up) is a little higher
+fn level_jump_height(level: u8, normal: f32, running: bool) -> f32 {
+    if level >= 2 { if running { LV_RUN_JUMP_HEIGHT } else { LV_JUMP_HEIGHT } } else { normal }
+}
+fn level_double_jump_height(level: u8) -> f32 {
+    if level >= 2 { LV_DOUBLE_JUMP_HEIGHT } else { DOUBLE_JUMP_HEIGHT }
+}
 /// Within this horizontal distance of a walk target counts as arrived.
 const ARRIVE_RADIUS: f32 = 0.5;
 /// This long below 20% of the requested speed counts as blocked.
@@ -70,6 +92,8 @@ const POSITION_KEEPALIVE_SECS: f32 = 2.0;
 #[derive(Deserialize, Debug)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum SynthCommand {
+    /// Emanate: the Synth's power level (0 normal, 1 Speed, 2 Jump, 3 Fly), with the same controls-v1 numbers the players get (`level` event).
+    Level { level: u8 },
     /// Walk (walk speed) to a world position through real movement and collisions.
     WalkTo { x: f32, y: Option<f32>, z: f32 },
     /// Same at run speed.
@@ -179,6 +203,8 @@ struct SynthState {
     last_pos: Option<Vec3>,
     position_timer: f32,
     last_reported: Option<Vec3>,
+    /// Emanate power level: 0 normal, 1 Speed, 2 Jump, 3 Fly (Fly is not flown yet: it moves as level 2)
+    level: u8,
 }
 
 pub struct SynthPlugin;
@@ -258,6 +284,7 @@ fn drain_commands(
     player_res: Res<PrimaryPlayerRes>,
     foreign: Query<(&ForeignPlayer, &Transform, Option<&UserProfile>)>,
     mut nav: ResMut<Nav>,
+    config: Res<AppConfig>,
 ) {
     let Ok(rx) = channel.0.lock() else { return };
     while let Ok(command) = rx.try_recv() {
@@ -297,6 +324,18 @@ fn drain_commands(
                 });
                 state.facing = None;
                 state.blocked_secs = 0.0;
+            }
+            SynthCommand::Level { level } => {
+                state.level = level.min(3);
+                nav.level = state.level;
+                emit(json!({
+                    "event": "level",
+                    "level": state.level,
+                    "run_speed": level_run_speed(state.level, config.player_settings.run_speed),
+                    "walk_speed": level_walk_speed(state.level, config.player_settings.walk_speed),
+                    "jump_height": level_jump_height(state.level, config.player_settings.jump_height, false),
+                    "double_jump_height": level_double_jump_height(state.level),
+                }));
             }
             SynthCommand::Stop => {
                 nav.active = false;
@@ -496,9 +535,9 @@ fn drive(
         } else {
             let dir = delta / dist;
             let mut speed = if goal.run {
-                config.player_settings.run_speed
+                level_run_speed(state.level, config.player_settings.run_speed)
             } else {
-                config.player_settings.walk_speed
+                level_walk_speed(state.level, config.player_settings.walk_speed)
             };
             if state.glide {
                 speed = GLIDE_SPEED;
@@ -565,7 +604,8 @@ fn drive(
             emit(json!({"event": "error", "error": "glide needs to be airborne: jump, then jump again (double jump), then glide"}));
         }
         if state.jump_requested {
-            state.vy = (2.0 * GRAVITY * config.player_settings.jump_height).sqrt();
+            let running = Vec3::new(horizontal.x, 0.0, horizontal.z).length() > 8.0;
+            state.vy = (2.0 * GRAVITY * level_jump_height(state.level, config.player_settings.jump_height, running)).sqrt();
         } else if horizontal != Vec3::ZERO {
             state.vy = -3.0; // stay glued to slopes while walking
         } else {
@@ -577,7 +617,7 @@ fn drive(
             state.double_jump_requested = false;
             if state.air_jumps == 0 && !state.glide {
                 state.air_jumps = 1;
-                state.vy = (2.0 * GRAVITY * DOUBLE_JUMP_HEIGHT).sqrt();
+                state.vy = (2.0 * GRAVITY * level_double_jump_height(state.level)).sqrt();
             }
         }
         if state.glide_requested {

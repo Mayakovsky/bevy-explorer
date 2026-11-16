@@ -52,6 +52,8 @@ pub enum Move {
     Climb,
     /// a step or drop down off a ledge
     Drop,
+    /// a jump (or a double jump) up onto an adjacent ledge or platform: only planned when the config's `jump_rise` allows it
+    Jump,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -70,11 +72,13 @@ pub struct PlanConfig {
     /// extra cost per metre climbed, per metre dropped (a drop is also a fixed cost)
     pub climb_cost: f32,
     pub drop_cost: f32,
+    /// the highest ledge a jump gets up onto (the Synth's power level: normal 1.5, Jump level 8.0 with the double jump); 0 = walking only
+    pub jump_rise: f32,
 }
 
 impl Default for PlanConfig {
     fn default() -> Self {
-        Self { radius_cells: 150, max_nodes: 60_000, goal_tolerance: 1.2, climb_cost: 0.6, drop_cost: 1.5 }
+        Self { radius_cells: 150, max_nodes: 60_000, goal_tolerance: 1.2, climb_cost: 0.6, drop_cost: 1.5, jump_rise: 0.0 }
     }
 }
 
@@ -125,11 +129,13 @@ pub struct Planner<'w, W: NavWorld> {
     world: &'w mut W,
     surfaces: HashMap<(i32, i32), Vec<f32>>,
     standable: HashMap<Node, bool>,
+    /// the highest ledge a jump reaches (0 = no jumping moves), from the config of the current query
+    jump_rise: f32,
 }
 
 impl<'w, W: NavWorld> Planner<'w, W> {
     pub fn new(world: &'w mut W) -> Self {
-        Self { world, surfaces: HashMap::new(), standable: HashMap::new() }
+        Self { world, surfaces: HashMap::new(), standable: HashMap::new(), jump_rise: 0.0 }
     }
 
     fn cell_surfaces(&mut self, ix: i32, iz: i32, from_y: f32) -> Vec<f32> {
@@ -228,10 +234,32 @@ impl<'w, W: NavWorld> Planner<'w, W> {
                 }
             }
         }
+        // jumps: up onto an adjacent ledge or platform no ramp reaches (a normal jump gets about 1.5 m, the Jump level's double jump about 8 m)
+        if self.jump_rise > MAX_STEP {
+            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let (jx, jz) = (n.ix + dx, n.iz + dz);
+                for s in self.cell_surfaces(jx, jz, p.y + self.jump_rise) {
+                    let rise = s - p.y;
+                    if rise <= MAX_STEP || rise > self.jump_rise {
+                        continue;
+                    }
+                    let m = Node { ix: jx, iz: jz, y: (s * 100.0).round() as i32 };
+                    if out.iter().any(|(o, _, _)| *o == m) || !self.can_stand(m) {
+                        continue;
+                    }
+                    // the air above the takeoff cell must be free up to the ledge (the avatar rises beside the wall before it moves over)
+                    if self.world.blocked(p.x, p.z, p.y + MAX_STEP, s + AVATAR_HEIGHT) {
+                        continue;
+                    }
+                    out.push((m, 2.5 + rise * 1.2, Move::Jump));
+                }
+            }
+        }
     }
 
     /// Plan a walk from `from` to `to` (`to.y` is optional: any level of the goal cell will do, the highest standable one first).
     pub fn plan(&mut self, from: Vec3, to: Vec3, to_level: bool, cfg: &PlanConfig) -> Result<Plan, PlanError> {
+        self.jump_rise = cfg.jump_rise;
         let start = self.node_at(from.x, from.z, Some(from.y)).ok_or(PlanError::NoStart)?;
         let level = if to_level { Some(to.y) } else { None };
         // a goal cell that is not standable (a prop or a wall has appeared there since it was listed) snaps to the nearest standable cell within 3 cells
@@ -315,6 +343,7 @@ impl<'w, W: NavWorld> Planner<'w, W> {
 
     /// Every standable node reachable from `from` within `max_cost` (cheapest cost to each), for choosing hiding spots: `(position, cost)`.
     pub fn reachable(&mut self, from: Vec3, max_cost: f32, cfg: &PlanConfig) -> Vec<(Vec3, f32)> {
+        self.jump_rise = cfg.jump_rise;
         let Some(start) = self.node_at(from.x, from.z, Some(from.y)) else { return Vec::new() };
         let mut open = BinaryHeap::new();
         let mut g: HashMap<Node, f32> = HashMap::new();
@@ -355,7 +384,7 @@ fn simplify(w: &[Waypoint]) -> Vec<Waypoint> {
     for i in 1..w.len() - 1 {
         let a = w[i].pos - out.last().unwrap().pos;
         let b = w[i + 1].pos - w[i].pos;
-        let same = w[i].how == w[i + 1].how && a.normalize_or_zero().dot(b.normalize_or_zero()) > 0.999;
+        let same = w[i].how == w[i + 1].how && w[i].how != Move::Jump && a.normalize_or_zero().dot(b.normalize_or_zero()) > 0.999;
         if !same {
             out.push(w[i]);
         }
