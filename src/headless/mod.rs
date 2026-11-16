@@ -8,6 +8,10 @@
 mod app;
 mod logs;
 #[cfg(not(target_arch = "wasm32"))]
+mod landscape;
+#[cfg(not(target_arch = "wasm32"))]
+pub use landscape::LandscapePlugin;
+#[cfg(not(target_arch = "wasm32"))]
 mod synth;
 #[cfg(not(target_arch = "wasm32"))]
 pub use synth::SynthPlugin;

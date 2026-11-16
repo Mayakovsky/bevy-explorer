@@ -2,12 +2,14 @@ pub mod asset_cache;
 pub mod base_domain;
 pub mod bounds_calc;
 pub mod dynamics;
+pub mod genesis_props;
 pub mod inputs;
 pub mod profile;
 pub mod rpc;
 pub mod sets;
 pub mod structs;
 pub mod terrain;
+pub mod unity_terrain;
 pub mod util;
 
 /// Panics on debug builds but only logs an error on release builds
