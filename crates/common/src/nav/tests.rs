@@ -212,3 +212,16 @@ fn glide_from_the_ground_has_no_ledge() {
     let mut w = tower_world();
     assert!(glide_to_goal(&mut w, Vec3::new(-20.0, 0.0, 5.0), Vec3::new(-40.0, 0.0, 5.0), 8.0, 0.3).is_none());
 }
+
+#[test]
+fn a_goal_inside_a_prop_snaps_to_the_nearest_standable_cell() {
+    let mut w = World { boxes: vec![B(19.0, 22.0, -1.0, 2.0, 0.0, 3.0)] };
+    // the goal point (20.5, 0.5) is inside the box: the plan ends beside it
+    let p = plan(&mut w, Vec3::new(0.5, 0.0, 0.5), Vec3::new(20.5, 0.0, 0.5), true).expect("snapped goal");
+    let end = p.waypoints.last().unwrap().pos;
+    assert!(((end.x - 20.5).powi(2) + (end.z - 0.5).powi(2)).sqrt() <= 4.5, "{end}");
+    assert!(!w.blocked(end.x, end.z, end.y + MAX_STEP, end.y + AVATAR_HEIGHT));
+    // a goal with nothing standable anywhere near still reports no_goal
+    let mut solid = World { boxes: vec![B(10.0, 60.0, -30.0, 30.0, 0.0, 50.0)] };
+    assert!(matches!(plan(&mut solid, Vec3::new(0.5, 0.0, 0.5), Vec3::new(30.5, 0.0, 0.5), false), Err(PlanError::NoStart) | Err(PlanError::NoGoal) | Err(PlanError::NoPath { .. })));
+}

@@ -161,7 +161,7 @@ pub fn nav_plan(
                         PlanError::NoGoal => "no_goal".to_string(),
                         PlanError::NoPath { expanded } => format!("no_path (searched {expanded})"),
                     };
-                    emit(json!({"event": "nav", "status": "failed", "reason": reason, "ms": ms}));
+                    emit(json!({"event": "nav", "status": "failed", "reason": reason, "ms": ms, "from": dcl_position(from), "goal": dcl_position(target)}));
                     nav.active = false;
                 }
             }

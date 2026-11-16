@@ -233,7 +233,28 @@ impl<'w, W: NavWorld> Planner<'w, W> {
     /// Plan a walk from `from` to `to` (`to.y` is optional: any level of the goal cell will do, the highest standable one first).
     pub fn plan(&mut self, from: Vec3, to: Vec3, to_level: bool, cfg: &PlanConfig) -> Result<Plan, PlanError> {
         let start = self.node_at(from.x, from.z, Some(from.y)).ok_or(PlanError::NoStart)?;
-        let goal_node = self.node_at(to.x, to.z, if to_level { Some(to.y) } else { None }).ok_or(PlanError::NoGoal)?;
+        let level = if to_level { Some(to.y) } else { None };
+        // a goal cell that is not standable (a prop or a wall has appeared there since it was listed) snaps to the nearest standable cell within 3 cells
+        let goal_node = match self.node_at(to.x, to.z, level) {
+            Some(n) => n,
+            None => {
+                let mut best: Option<(f32, Node)> = None;
+                for dx in -3..=3 {
+                    for dz in -3..=3 {
+                        if dx == 0 && dz == 0 {
+                            continue;
+                        }
+                        if let Some(n) = self.node_at(to.x + dx as f32 * CELL, to.z + dz as f32 * CELL, level) {
+                            let d = ((dx * dx + dz * dz) as f32).sqrt();
+                            if best.map(|(bd, _)| d < bd).unwrap_or(true) {
+                                best = Some((d, n));
+                            }
+                        }
+                    }
+                }
+                best.map(|(_, n)| n).ok_or(PlanError::NoGoal)?
+            }
+        };
         let goal_pos = goal_node.pos();
         let h = |n: &Node| -> f32 { (n.pos() - goal_pos).length() };
         let mut open = BinaryHeap::new();
