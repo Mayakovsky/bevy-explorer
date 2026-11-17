@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 use common::{
+    nav::NavWorld,
     fly::{steer, FlightSearch, FlightState, FlyConfig, FlyStatus, FLY_SINK},
     structs::PrimaryUser,
 };
@@ -26,7 +27,8 @@ pub enum FlyRequest {
     /// fixed look: yaw (degrees, the `face` convention), pitch (degrees), seconds
     Dir { yaw: f32, pitch: f32, secs: f32 },
     To { target: Vec3 },
-    Plan { target: Vec3 },
+    /// `hover`: the target is a hover over a standable spot: its column of air up to the target must be clear
+    Plan { target: Vec3, hover: bool },
 }
 
 enum Mode {
@@ -113,10 +115,17 @@ pub fn fly_drive(
                     fly.mode = Mode::Path;
                     emit(json!({"event": "fly", "status": "planned", "kind": "direct", "waypoints": 1, "goal": dcl_position(target)}));
                 }
-                FlyRequest::Plan { target } => {
+                FlyRequest::Plan { target, hover } => {
                     fly.mode = Mode::Idle;
                     let mut guards: Vec<Mut<SceneColliderData>> = scenes.iter_mut().collect();
                     let mut world = EngineWorld::new(&mut guards, landscape.as_deref());
+                    if hover {
+                        let ground = world.surfaces(target.x, target.z, target.y).first().copied().unwrap_or(0.0);
+                        if !common::fly::column_clear(&mut world, target.x, target.z, ground, target.y) {
+                            fail("column_blocked", json!({"goal": dcl_position(target)}));
+                            return;
+                        }
+                    }
                     match FlightSearch::new(&mut world, pos, target, FlyConfig::default()) {
                         Ok(search) => fly.job = Some(Job { search, started: Instant::now(), work_ms: 0.0, target }),
                         Err(e) => fail(&format!("{e:?}"), json!({"goal": dcl_position(target)})),

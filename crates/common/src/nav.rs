@@ -286,6 +286,11 @@ impl<'w, W: NavWorld> Planner<'w, W> {
                     if self.world.blocked(p.x, p.z, p.y + MAX_STEP, s + AVATAR_HEIGHT) {
                         continue;
                     }
+                    // headroom: the jump rises through the whole column, so the body must have room 0.2 m toward the ledge as well (a slab whose edge is 0.25 m from the
+                    // cell centre leaves the centre free and the head hits the underside; round 17, the 9.6 m spot under the overhang on the tall scene)
+                    if self.world.blocked(p.x + dx as f32 * 0.2, p.z + dz as f32 * 0.2, p.y + MAX_STEP, s + AVATAR_HEIGHT) {
+                        continue;
+                    }
                     out.push((m, 2.5 + rise * 1.2, Move::Jump));
                 }
             }

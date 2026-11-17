@@ -188,3 +188,12 @@ fn the_route_ends_on_the_goal() {
     let p = run_search(&mut w, Vec3::new(0.0, 2.0, 0.0), g).unwrap();
     assert!((*p.last().unwrap() - (g + Vec3::Y)).length() < 1.0, "{:?}", p.last());
 }
+
+#[test]
+fn a_hover_column_is_clear_only_where_nothing_stands_above() {
+    let mut w = World { boxes: vec![B(20.0, 40.0, -20.0, 20.0, 0.0, 60.0)] };
+    assert!(column_clear(&mut w, 0.0, 0.0, 0.0, 40.0));
+    assert!(!column_clear(&mut w, 30.0, 0.0, 0.0, 40.0)); // inside the tower
+    assert!(!column_clear(&mut w, 18.5, 0.0, 0.0, 40.0)); // beside it, inside the margin
+    assert!(column_clear(&mut w, 30.0, 0.0, 61.0, 100.0)); // above its roof the column is clear
+}

@@ -125,7 +125,13 @@ pub enum SynthCommand {
     /// Emanate level 3: fly straight at a point (no planning).
     FlyTo { x: f32, y: f32, z: f32 },
     /// Emanate level 3: plan a free-space route (sliced search) and fly it.
-    FlyPlan { x: f32, y: f32, z: f32 },
+    FlyPlan {
+        x: f32,
+        y: f32,
+        z: f32,
+        #[serde(default)]
+        hover: bool,
+    },
     /// Abandon the current walk/run target.
     Stop,
     /// Ground: takeoff. In the air: DCL's sequence, first press = double jump, second = open the
@@ -367,9 +373,9 @@ fn drain_commands(
                 state.freeze_air = false;
                 fly.request = Some(FlyRequest::To { target: to_bevy(x, y, z) });
             }
-            SynthCommand::FlyPlan { x, y, z } => {
+            SynthCommand::FlyPlan { x, y, z, hover } => {
                 state.freeze_air = false;
-                fly.request = Some(FlyRequest::Plan { target: to_bevy(x, y, z) });
+                fly.request = Some(FlyRequest::Plan { target: to_bevy(x, y, z), hover });
             }
             SynthCommand::Stop => {
                 fly.stop();
@@ -418,6 +424,12 @@ fn drain_commands(
                     response: None,
                 }));
                 state.goal = None;
+                // a teleport while airborne (the server keeps the altitude it knew) ends the glide and any flight: the Synth drops to the ground at the new spot
+                // before anything else acts (a held glide would take minutes from a high altitude)
+                fly.stop();
+                state.glide = false;
+                state.glide_requested = false;
+                state.freeze_air = false;
             }
             SynthCommand::Look { yaw, pitch: _ } => {
                 state.facing = Some(yaw);

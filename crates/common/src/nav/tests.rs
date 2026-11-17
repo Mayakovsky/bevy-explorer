@@ -311,3 +311,15 @@ fn a_reachable_search_run_in_slices_gives_the_same_spots_as_one_call() {
     assert_eq!(whole.len(), a.len());
     assert_eq!(whole.len(), b.len());
 }
+
+#[test]
+fn a_jump_needs_headroom_toward_the_ledge() {
+    // the platform's west face 0.15 m inside the takeoff cell: the cell centre is clear, the body 0.2 m toward the ledge is not
+    let level2 = PlanConfig { jump_rise: 8.0, ..PlanConfig::default() };
+    let from = Vec3::new(0.5, 0.0, 0.5);
+    let to = Vec3::new(12.5, 7.5, 0.5);
+    let mut tight = World { boxes: vec![B(9.85, 14.0, -200.0, 200.0, 0.0, 7.5)] };
+    assert!(Planner::new(&mut tight).plan(from, to, true, &level2).is_err(), "no takeoff with the face 0.15 m into the cell");
+    let mut clear = World { boxes: vec![B(10.0, 14.0, -200.0, 200.0, 0.0, 7.5)] };
+    assert!(Planner::new(&mut clear).plan(from, to, true, &level2).is_ok(), "a face on the cell boundary still works");
+}

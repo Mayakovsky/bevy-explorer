@@ -414,5 +414,18 @@ impl FlightSearch {
     }
 }
 
+/// Is the air straight above a spot clear (with the route margin) from `y_from` up to `y_to`? A hover target is only valid where it is: no building in the way.
+pub fn column_clear<W: NavWorld>(world: &mut W, x: f32, z: f32, y_from: f32, y_to: f32) -> bool {
+    let mut y = y_from + 2.0;
+    while y <= y_to {
+        let (y0, y1) = (y - 0.5 - MARGIN * 0.5, y - 0.5 + AVATAR_HEIGHT + 1.0 + MARGIN * 0.5);
+        if [(0.0, 0.0), (MARGIN, 0.0), (-MARGIN, 0.0), (0.0, MARGIN), (0.0, -MARGIN)].iter().any(|(dx, dz)| world.blocked(x + dx, z + dz, y0, y1)) {
+            return false;
+        }
+        y += 2.0;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests;
