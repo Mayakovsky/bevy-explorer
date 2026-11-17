@@ -20,6 +20,9 @@ use crate::headless::landscape::Landscape;
 const MASK: u32 = ColliderLayer::ClPhysics as u32 | GROUND_COLLISION_MASK;
 /// A waypoint counts as reached within this horizontal distance (the last one: the arrive radius of the walk goal).
 const REACH: f32 = 0.9;
+/// a jump that rises more than this is a tall (double) jump: lined up on the takeoff cell, then straight up
+const TALL_JUMP_RISE: f32 = 2.5;
+const LINEUP: f32 = 0.5;
 const MAX_REPLANS: u32 = 4;
 const GIVE_UP_SECS: f32 = 150.0;
 
@@ -297,13 +300,42 @@ pub fn nav_follow(
         }
     }
     // a jump move: up onto a ledge or platform: jump near the foot of it, and with the Jump level's double jump near the top of the first jump
+    let mut aim = wp.pos;
     if wp.how == Move::Jump {
         let rise = wp.pos.y - pos.y;
-        if rise > 0.15 && state.grounded && dh < 2.0 && now - nav.last_jump > 0.7 {
+        // a TALL jump (the double jump) goes up first and over second: it lines up on the takeoff cell, stands still, jumps straight up and only walks onto the ledge once it is
+        // near the ledge's height. (Round 20: it used to start the jump 1.4 to 2 m short and keep running, so the arc went up under the ledge's overhang and the head hit it.)
+        let tall = rise > TALL_JUMP_RISE;
+        let takeoff = if nav.idx > 0 { Some(nav.path[nav.idx - 1].pos) } else { None };
+        let mut hold = false;
+        if tall && state.grounded {
+            let d_takeoff = takeoff.map(|t| Vec2::new(t.x - pos.x, t.z - pos.z).length()).unwrap_or(0.0);
+            if d_takeoff > LINEUP {
+                aim = takeoff.unwrap();
+                if d_takeoff < LINEUP + 0.3 {
+                    nav.just_set = false; // the walk goal clears itself on arrival: not a block
+                }
+            } else {
+                hold = true;
+                if rise > 0.15 && now - nav.last_jump > 0.7 {
+                    state.jump_requested = true;
+                    nav.last_jump = now;
+                }
+            }
+        } else if tall && !state.grounded && pos.y < wp.pos.y - 1.2 {
+            hold = true; // rising: no sideways drift until the ledge is near
+        } else if rise > 0.15 && state.grounded && dh < 2.0 && now - nav.last_jump > 0.7 {
             state.jump_requested = true;
             nav.last_jump = now;
-        } else if !state.grounded && state.air_jumps == 0 && rise > 1.4 && state.vy < 3.0 {
+        }
+        if !state.grounded && state.air_jumps == 0 && rise > 1.4 && state.vy < 3.0 {
             state.double_jump_requested = true;
+        }
+        if hold {
+            state.goal = None;
+            state.facing = None;
+            nav.just_set = false;
+            return;
         }
     }
     // stairs: a rise the capsule cannot slide over is jumped
@@ -311,7 +343,7 @@ pub fn nav_follow(
         state.jump_requested = true;
         nav.last_jump = now;
     }
-    state.goal = Some(Goal { target: wp.pos, run: nav.run });
+    state.goal = Some(Goal { target: aim, run: nav.run });
     state.facing = None;
     nav.just_set = true;
 }
