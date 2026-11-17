@@ -79,9 +79,15 @@ pub struct SpotsJob {
     frames: u32,
 }
 
-struct EngineWorld<'a, 'b> {
+pub struct EngineWorld<'a, 'b> {
     scenes: &'a mut Vec<Mut<'b, SceneColliderData>>,
     landscape: Option<&'a Landscape>,
+}
+
+impl<'a, 'b> EngineWorld<'a, 'b> {
+    pub fn new(scenes: &'a mut Vec<Mut<'b, SceneColliderData>>, landscape: Option<&'a Landscape>) -> Self {
+        EngineWorld { scenes, landscape }
+    }
 }
 
 impl NavWorld for EngineWorld<'_, '_> {

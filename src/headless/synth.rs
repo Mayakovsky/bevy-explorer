@@ -16,7 +16,9 @@
 //! Pulse position broadcast are the engine's own. The channel is stdin (not a socket) because the
 //! orchestrator spawns this process and already owns its pipes.
 
+mod fly;
 mod nav;
+use fly::{fly_drive, Fly, FlyRequest};
 use nav::{glide_follow, nav_follow, nav_plan, nav_spots_step, Nav, NavRequest};
 use std::sync::{mpsc, Mutex};
 
@@ -116,6 +118,12 @@ pub enum SynthCommand {
     GlideEscape { away_x: f32, away_z: f32 },
     /// Emanate: from a high place, glide to a lower goal (a ledge run, a jump, a straight glide, then the glider closes above the goal). Fails cleanly (`glide` failed, `no_glide`) when the goal cannot be reached by gliding: walk instead.
     GlideTo { x: f32, y: Option<f32>, z: f32 },
+    /// Emanate level 3: fly at a fixed look for `secs` (measurement flight). yaw as in `face`, pitch in degrees (up positive). Events: `fly`, `fly_log`.
+    FlyDir { yaw: f32, pitch: f32, secs: f32 },
+    /// Emanate level 3: fly straight at a point (no planning).
+    FlyTo { x: f32, y: f32, z: f32 },
+    /// Emanate level 3: plan a free-space route (sliced search) and fly it.
+    FlyPlan { x: f32, y: f32, z: f32 },
     /// Abandon the current walk/run target.
     Stop,
     /// Ground: takeoff. In the air: DCL's sequence, first press = double jump, second = open the
@@ -213,12 +221,13 @@ impl Plugin for SynthPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(SynthChannel(Mutex::new(spawn_stdin_reader())))
             .init_resource::<SynthState>()
+            .init_resource::<Fly>()
             .init_resource::<SynthBroadcastOverride>()
             .init_resource::<Nav>()
             .add_systems(Startup, announce)
             .add_systems(
                 Update,
-                (release_profile_deploy, drain_commands, nav_plan, nav_spots_step, nav_follow, glide_follow, drive, emit_chat, track_players)
+                (release_profile_deploy, drain_commands, nav_plan, nav_spots_step, nav_follow, glide_follow, fly_drive, drive, emit_chat, track_players)
                     .chain()
                     // after the engine picked the active AvatarMovement for this frame, before the
                     // PostUpdate movement pipeline applies it
@@ -284,6 +293,7 @@ fn drain_commands(
     player_res: Res<PrimaryPlayerRes>,
     foreign: Query<(&ForeignPlayer, &Transform, Option<&UserProfile>)>,
     mut nav: ResMut<Nav>,
+    mut fly: ResMut<Fly>,
     config: Res<AppConfig>,
 ) {
     let Ok(rx) = channel.0.lock() else { return };
@@ -337,7 +347,11 @@ fn drain_commands(
                     "double_jump_height": level_double_jump_height(state.level),
                 }));
             }
+            SynthCommand::FlyDir { yaw, pitch, secs } => fly.request = Some(FlyRequest::Dir { yaw, pitch, secs }),
+            SynthCommand::FlyTo { x, y, z } => fly.request = Some(FlyRequest::To { target: to_bevy(x, y, z) }),
+            SynthCommand::FlyPlan { x, y, z } => fly.request = Some(FlyRequest::Plan { target: to_bevy(x, y, z) }),
             SynthCommand::Stop => {
+                fly.stop();
                 nav.active = false;
                 if state.grounded {
                     nav.glide = None;
@@ -509,6 +523,7 @@ fn drive(
     >,
     mut movement_control: ResMut<EngineMovementControl>,
     mut broadcast: ResMut<SynthBroadcastOverride>,
+    mut fly: ResMut<Fly>,
     config: Res<AppConfig>,
 ) {
     let Ok((transform, dynamic, mut active)) = player.single_mut() else {
@@ -636,6 +651,14 @@ fn drive(
     broadcast.gliding = state.glide;
 
     active.component.velocity = Vec3::new(horizontal.x, state.vy, horizontal.z);
+    if let Some(v) = fly.velocity.take() {
+        // level 3 flight: the thrust model's velocity replaces the walking physics for this frame
+        state.vy = v.y;
+        state.glide = true;
+        active.component.velocity = v;
+        active.component.orientation = (-v.x).atan2(-v.z).to_degrees();
+        state.last_yaw = active.component.orientation;
+    }
     if let Some(yaw) = yaw_deg {
         state.last_yaw = yaw;
     }
