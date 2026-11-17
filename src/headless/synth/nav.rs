@@ -31,6 +31,8 @@ pub enum NavRequest {
     Glide { away: Vec2 },
     /// Glide from here to a lower goal (bevy position); fails cleanly when it cannot be reached by gliding.
     GlideTo { target: Vec3 },
+    /// Diagnostics: the surfaces and the blocked-by-height picture of a patch of the world around `center` (bevy x/z), as the planner sees it.
+    Probe { center: Vec2, half: f32, y_lo: f32, y_hi: f32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -198,6 +200,26 @@ pub fn nav_plan(
             let choice = glide_to_goal(&mut world, from, target, GLIDE_SPEED, GLIDE_FALL);
             let ms = t0.elapsed().as_millis() as u64;
             start_glide(&mut nav, choice, usize::from(choice.is_some()), from, ms, time.elapsed_secs(), "to");
+        }
+        NavRequest::Probe { center, half, y_lo, y_hi } => {
+            let mut rows = Vec::new();
+            let steps = (half * 2.0 / 0.5) as i32;
+            for iz in 0..=steps {
+                for ix in 0..=steps {
+                    let (x, z) = (center.x - half + ix as f32 * 0.5, center.y - half + iz as f32 * 0.5);
+                    let surf: Vec<f32> = world.surfaces(x, z, y_hi).into_iter().filter(|y| *y >= y_lo - 0.5).take(4).map(|y| (y * 100.0).round() / 100.0).collect();
+                    // blocked by the planner's cylinder (radius 0.3) for a body from y to y+2, every 0.5 m of height
+                    let mut b = String::new();
+                    let mut y = y_lo;
+                    while y <= y_hi {
+                        b.push(if world.blocked(x, z, y, y + 2.0) { '#' } else { '.' });
+                        y += 0.5;
+                    }
+                    let d = dcl_position(Vec3::new(x, 0.0, z));
+                    rows.push(json!([d[0], d[2], surf, b]));
+                }
+            }
+            emit(json!({"event": "nav_probe", "y_lo": y_lo, "y_hi": y_hi, "step_y": 0.5, "rows": rows}));
         }
         NavRequest::Spots { max_cost } => {
             // the spot list reaches farther than a route plan does (a long run, up to about 100 m, needs spots near the top of its budget). It is computed a slice of

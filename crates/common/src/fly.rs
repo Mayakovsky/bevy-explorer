@@ -142,6 +142,8 @@ pub fn steer(pos: Vec3, vel: Vec3, target: Vec3) -> (Vec3, bool) {
 pub const FCELL: f32 = 4.0;
 /// A cell centre is open when the Synth's body fits there and the ground is at least this far below.
 const CLEARANCE: f32 = 1.0;
+/// the air that must be clear around a cell centre (m)
+const MARGIN: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct FlyConfig {
@@ -279,7 +281,11 @@ impl FlightSearch {
             return *o;
         }
         let p = node_pos(self.origin, n);
-        let open = p.y >= 1.0 && p.y <= self.cfg.ceiling && !world.blocked(p.x, p.z, p.y - 0.5, p.y - 0.5 + AVATAR_HEIGHT + 1.0) && {
+        // a margin of MARGIN m on every side: the Synth follows the route at 19 m/s and cuts corners, so a cell is open only when the air around it is clear too
+        // the cells right around the start use the plain body (a takeoff from a roof edge or a narrow street must find a way up and out)
+        let near_start = n.ix.abs() <= 2 && n.iy.abs() <= 2 && n.iz.abs() <= 2;
+        let blocked = if near_start { world.blocked(p.x, p.z, p.y - 0.5, p.y - 0.5 + AVATAR_HEIGHT + 1.0) } else { Self::body_blocked(world, p.x, p.z, p.y) };
+        let open = p.y >= 1.0 && p.y <= self.cfg.ceiling && !blocked && {
             // the ground is below the body: the highest surface at or below the cell is at least CLEARANCE under it
             let top = world.surfaces(p.x, p.z, p.y).first().copied();
             top.map(|t| p.y - t >= CLEARANCE).unwrap_or(true)
@@ -288,11 +294,20 @@ impl FlightSearch {
         open
     }
 
+    /// The body plus a margin: the centre and four points MARGIN m around it must all be clear.
+    fn body_blocked<W: NavWorld>(world: &mut W, x: f32, z: f32, y: f32) -> bool {
+        let (y0, y1) = (y - 0.5 - MARGIN * 0.5, y - 0.5 + AVATAR_HEIGHT + 1.0 + MARGIN * 0.5);
+        [(0.0, 0.0), (MARGIN, 0.0), (-MARGIN, 0.0), (0.0, MARGIN), (0.0, -MARGIN)].iter().any(|(dx, dz)| world.blocked(x + dx, z + dz, y0, y1))
+    }
+
     /// A move between two adjacent cells is free when the segment's middle is free too (a thin wall between two open cells).
     fn segment_free<W: NavWorld>(&mut self, world: &mut W, a: FNode, b: FNode) -> bool {
         let (pa, pb) = (node_pos(self.origin, a), node_pos(self.origin, b));
         let m = (pa + pb) * 0.5;
-        !world.blocked(m.x, m.z, m.y - 0.5, m.y - 0.5 + AVATAR_HEIGHT + 1.0)
+        if a.ix.abs() <= 2 && a.iy.abs() <= 2 && a.iz.abs() <= 2 {
+            return !world.blocked(m.x, m.z, m.y - 0.5, m.y - 0.5 + AVATAR_HEIGHT + 1.0);
+        }
+        !Self::body_blocked(world, m.x, m.z, m.y)
     }
 
     pub fn expanded(&self) -> usize {
@@ -386,7 +401,7 @@ impl FlightSearch {
         let n = (len / 2.0).ceil().max(1.0) as i32;
         for k in 1..n {
             let p = a + (b - a) * (k as f32 / n as f32);
-            if world.blocked(p.x, p.z, p.y - 0.5, p.y - 0.5 + AVATAR_HEIGHT + 1.0) {
+            if Self::body_blocked(world, p.x, p.z, p.y) {
                 return false;
             }
             if let Some(t) = world.surfaces(p.x, p.z, p.y).first() {

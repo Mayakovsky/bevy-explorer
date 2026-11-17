@@ -118,6 +118,8 @@ pub enum SynthCommand {
     GlideEscape { away_x: f32, away_z: f32 },
     /// Emanate: from a high place, glide to a lower goal (a ledge run, a jump, a straight glide, then the glider closes above the goal). Fails cleanly (`glide` failed, `no_glide`) when the goal cannot be reached by gliding: walk instead.
     GlideTo { x: f32, y: Option<f32>, z: f32 },
+    /// Diagnostics: print the planner's picture (surfaces, blocked by height) of a patch around a world position (`nav_probe` event).
+    NavProbe { x: f32, z: f32, #[serde(default = "default_probe_half")] half: f32, y_lo: f32, y_hi: f32 },
     /// Emanate level 3: fly at a fixed look for `secs` (measurement flight). yaw as in `face`, pitch in degrees (up positive). Events: `fly`, `fly_log`.
     FlyDir { yaw: f32, pitch: f32, secs: f32 },
     /// Emanate level 3: fly straight at a point (no planning).
@@ -171,6 +173,10 @@ fn yes() -> bool {
     true
 }
 
+fn default_probe_half() -> f32 {
+    4.0
+}
+
 fn default_spot_cost() -> f32 {
     120.0
 }
@@ -196,6 +202,8 @@ struct SynthState {
     double_jump_requested: bool,
     glide_requested: bool,
     glide: bool,
+    /// `stop` while airborne: hold still in the air (a frozen Synth does not drift on its glider); cleared by landing, a new goal or a flight
+    freeze_air: bool,
     /// air jumps used since leaving the ground (0 or 1)
     air_jumps: u8,
     emote_count: u32,
@@ -307,6 +315,10 @@ fn drain_commands(
                 nav.replans = 0;
                 nav.pending = Some(NavRequest::To { target: to_bevy(x, y.unwrap_or(0.0), z), level: y.is_some(), run });
             }
+            SynthCommand::NavProbe { x, z, half, y_lo, y_hi } => {
+                let c = to_bevy(x, 0.0, z);
+                nav.pending = Some(NavRequest::Probe { center: Vec2::new(c.x, c.z), half, y_lo, y_hi });
+            }
             SynthCommand::GlideTo { x, y, z } => {
                 nav.pending = Some(NavRequest::GlideTo { target: to_bevy(x, y.unwrap_or(0.0), z) });
             }
@@ -347,11 +359,23 @@ fn drain_commands(
                     "double_jump_height": level_double_jump_height(state.level),
                 }));
             }
-            SynthCommand::FlyDir { yaw, pitch, secs } => fly.request = Some(FlyRequest::Dir { yaw, pitch, secs }),
-            SynthCommand::FlyTo { x, y, z } => fly.request = Some(FlyRequest::To { target: to_bevy(x, y, z) }),
-            SynthCommand::FlyPlan { x, y, z } => fly.request = Some(FlyRequest::Plan { target: to_bevy(x, y, z) }),
+            SynthCommand::FlyDir { yaw, pitch, secs } => {
+                state.freeze_air = false;
+                fly.request = Some(FlyRequest::Dir { yaw, pitch, secs });
+            }
+            SynthCommand::FlyTo { x, y, z } => {
+                state.freeze_air = false;
+                fly.request = Some(FlyRequest::To { target: to_bevy(x, y, z) });
+            }
+            SynthCommand::FlyPlan { x, y, z } => {
+                state.freeze_air = false;
+                fly.request = Some(FlyRequest::Plan { target: to_bevy(x, y, z) });
+            }
             SynthCommand::Stop => {
                 fly.stop();
+                if !state.grounded {
+                    state.freeze_air = true;
+                }
                 nav.active = false;
                 if state.grounded {
                     nav.glide = None;
@@ -564,7 +588,10 @@ fn drive(
             yaw_deg = Some((-dir.x).atan2(-dir.z).to_degrees());
         }
     }
-    if state.glide && state.goal.is_none() {
+    if state.goal.is_some() {
+        state.freeze_air = false;
+    }
+    if state.glide && state.goal.is_none() && !state.freeze_air {
         // carry forward along the facing (yaw convention: dir = (-sin yaw, 0, -cos yaw))
         let yaw = state.facing.unwrap_or(state.last_yaw).to_radians();
         horizontal = Vec3::new(-yaw.sin(), 0.0, -yaw.cos()) * GLIDE_SPEED;
@@ -611,6 +638,7 @@ fn drive(
     let grounded = dynamic.ground_height <= 0.1 || pos.y <= 0.01;
     state.grounded = grounded;
     if grounded {
+        state.freeze_air = false;
         state.glide = false; // landing ends a glide
         state.air_jumps = 0;
         state.double_jump_requested = false;
