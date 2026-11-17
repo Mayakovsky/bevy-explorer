@@ -17,7 +17,7 @@
 //! orchestrator spawns this process and already owns its pipes.
 
 mod nav;
-use nav::{glide_follow, nav_follow, nav_plan, Nav, NavRequest};
+use nav::{glide_follow, nav_follow, nav_plan, nav_spots_step, Nav, NavRequest};
 use std::sync::{mpsc, Mutex};
 
 use bevy::prelude::*;
@@ -218,7 +218,7 @@ impl Plugin for SynthPlugin {
             .add_systems(Startup, announce)
             .add_systems(
                 Update,
-                (release_profile_deploy, drain_commands, nav_plan, nav_follow, glide_follow, drive, emit_chat, track_players)
+                (release_profile_deploy, drain_commands, nav_plan, nav_spots_step, nav_follow, glide_follow, drive, emit_chat, track_players)
                     .chain()
                     // after the engine picked the active AvatarMovement for this frame, before the
                     // PostUpdate movement pipeline applies it
