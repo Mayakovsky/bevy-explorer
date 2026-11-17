@@ -71,8 +71,10 @@ pub fn config(
         scene_threads,
 
         // load everything around the fake player generously; unload never.
-        scene_load_distance: 100.0,
-        scene_unload_extra_distance: 0.0,
+        // round 20: the Synth's footprint is mostly the scenes it keeps loaded (its scene runtime is about 2.8 GB of its 3.8 GB): EMANATE_SCENE_LOAD (metres, default 100) and
+        // EMANATE_SCENE_UNLOAD_EXTRA (metres past the load distance before a scene is dropped, default 0 = never) trade memory against how far the route planner can see
+        scene_load_distance: std::env::var("EMANATE_SCENE_LOAD").ok().and_then(|v| v.parse().ok()).unwrap_or(100.0),
+        scene_unload_extra_distance: std::env::var("EMANATE_SCENE_UNLOAD_EXTRA").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0),
         scene_log_to_console,
         // headless permission policy (hammurabi parity): network APIs allowed, everything
         // user-facing denied. Without an explicit value these resolve to Ask, and the Ask
