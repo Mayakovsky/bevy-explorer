@@ -388,7 +388,7 @@ pub fn nav_spots_step(mut nav: ResMut<Nav>, mut scenes: Query<&mut SceneCollider
     }
     let mut spots: Vec<_> = best.into_values().collect();
     spots.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    spots.truncate(900);
+    spots.truncate(1800); // was 900, which cut the list at about 92 m of walking: the far spots a long run needs were dropped
     let list: Vec<_> = spots
         .iter()
         .map(|(p, c)| {
