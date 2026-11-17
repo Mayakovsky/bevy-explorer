@@ -152,7 +152,8 @@ pub fn create_runtime(
     // a cap here bounds ONE scene's memory and stops a single runaway/hostile scene from
     // OOM-killing the shared sidecar (and every co-tenant scene with it). The near-limit
     // callback below terminates just that isolate instead of aborting the process.
-    const MAX_SCENE_HEAP_BYTES: usize = 512 * 1024 * 1024;
+    // EMANATE_SCENE_HEAP_MB overrides the cap (default 512) so a memory-limited host can run with a smaller one.
+    let max_scene_heap_bytes: usize = std::env::var("EMANATE_SCENE_HEAP_MB").ok().and_then(|v| v.parse::<usize>().ok()).filter(|v| *v >= 32).unwrap_or(512) * 1024 * 1024;
 
     // create runtime
     #[allow(unused_mut)]
@@ -162,7 +163,7 @@ pub fn create_runtime(
         ],
         inspector: inspect,
         create_params: Some(
-            deno_core::v8::CreateParams::default().heap_limits(0, MAX_SCENE_HEAP_BYTES),
+            deno_core::v8::CreateParams::default().heap_limits(0, max_scene_heap_bytes),
         ),
         ..Default::default()
     });
@@ -189,7 +190,7 @@ pub fn create_runtime(
         runtime.add_near_heap_limit_callback(move |current, _initial| {
             let first_trip = !granted.swap(true, std::sync::atomic::Ordering::SeqCst);
             if first_trip {
-                bevy::prelude::error!("scene exceeded its {MAX_SCENE_HEAP_BYTES}-byte heap cap; terminating the scene isolate");
+                bevy::prelude::error!("scene exceeded its {max_scene_heap_bytes}-byte heap cap; terminating the scene isolate");
             }
             // termination alone only unwinds the current js: the heap stays rooted by the
             // scene globals and the scene loop keeps ticking through uncaught errors, so it
