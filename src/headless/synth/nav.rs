@@ -115,7 +115,7 @@ impl NavWorld for EngineWorld<'_, '_> {
 
 /// planner limits at a power level: the highest ledge a jump gets up onto is about 1.4 m normally and about 8 m with the Jump level's double jump (measured: a double jump 0.4 s after the jump peaks at 10.7 m)
 fn cfg(level: u8) -> PlanConfig {
-    PlanConfig { radius_cells: 70, max_nodes: 30_000, goal_tolerance: 1.2, jump_rise: if level >= 2 { 8.0 } else { 1.4 }, ..Default::default() }
+    PlanConfig { radius_cells: 105, max_nodes: 60_000, goal_tolerance: 1.2, jump_rise: if level >= 2 { 8.0 } else { 1.4 }, ..Default::default() }
 }
 
 fn dcl_list(path: &[Waypoint]) -> Vec<serde_json::Value> {
