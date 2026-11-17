@@ -125,6 +125,34 @@ fn cell_of(v: f32) -> i32 {
 }
 
 /// The planner keeps a per-cell cache of surfaces; build a fresh one (or call `clear`) when the colliders change.
+/// What a planner has learned about the world (surface columns and standability): kept between slices of a long search.
+#[derive(Default)]
+pub struct NavCache {
+    surfaces: HashMap<(i32, i32), Vec<f32>>,
+    standable: HashMap<Node, bool>,
+}
+
+/// A reachable-spot search that can be run a few hundred nodes at a time, so a game loop keeps going while it works.
+pub struct ReachSearch {
+    start: Node,
+    open: BinaryHeap<Open>,
+    g: HashMap<Node, f32>,
+    expanded: usize,
+    max_cost: f32,
+    cfg: PlanConfig,
+    pub done: bool,
+}
+
+impl ReachSearch {
+    /// the nodes reached so far with their cheapest cost
+    pub fn spots(&self) -> Vec<(Vec3, f32)> {
+        self.g.iter().map(|(n, c)| (n.pos(), *c)).collect()
+    }
+    pub fn expanded(&self) -> usize {
+        self.expanded
+    }
+}
+
 pub struct Planner<'w, W: NavWorld> {
     world: &'w mut W,
     surfaces: HashMap<(i32, i32), Vec<f32>>,
@@ -136,6 +164,13 @@ pub struct Planner<'w, W: NavWorld> {
 impl<'w, W: NavWorld> Planner<'w, W> {
     pub fn new(world: &'w mut W) -> Self {
         Self { world, surfaces: HashMap::new(), standable: HashMap::new(), jump_rise: 0.0 }
+    }
+    /// a planner that starts with what an earlier slice learned
+    pub fn with_cache(world: &'w mut W, cache: NavCache) -> Self {
+        Self { world, surfaces: cache.surfaces, standable: cache.standable, jump_rise: 0.0 }
+    }
+    pub fn into_cache(self) -> NavCache {
+        NavCache { surfaces: self.surfaces, standable: self.standable }
     }
 
     fn cell_surfaces(&mut self, ix: i32, iz: i32, from_y: f32) -> Vec<f32> {
@@ -343,35 +378,53 @@ impl<'w, W: NavWorld> Planner<'w, W> {
 
     /// Every standable node reachable from `from` within `max_cost` (cheapest cost to each), for choosing hiding spots: `(position, cost)`.
     pub fn reachable(&mut self, from: Vec3, max_cost: f32, cfg: &PlanConfig) -> Vec<(Vec3, f32)> {
+        let Some(mut search) = self.reach_start(from, max_cost, cfg) else { return Vec::new() };
+        self.reach_step(&mut search, usize::MAX);
+        search.spots()
+    }
+
+    /// Begin a reachable-spot search (see [`Planner::reach_step`]); `None` when there is nowhere to stand at `from`.
+    pub fn reach_start(&mut self, from: Vec3, max_cost: f32, cfg: &PlanConfig) -> Option<ReachSearch> {
         self.jump_rise = cfg.jump_rise;
-        let Some(start) = self.node_at(from.x, from.z, Some(from.y)) else { return Vec::new() };
+        let start = self.node_at(from.x, from.z, Some(from.y))?;
         let mut open = BinaryHeap::new();
         let mut g: HashMap<Node, f32> = HashMap::new();
         g.insert(start, 0.0);
         open.push(Open { f: 0.0, node: start });
+        Some(ReachSearch { start, open, g, expanded: 0, max_cost, cfg: cfg.clone(), done: false })
+    }
+
+    /// Expand up to `budget` more nodes of a search; `search.done` is set when the search has finished (or hit its node limit).
+    pub fn reach_step(&mut self, search: &mut ReachSearch, budget: usize) {
+        self.jump_rise = search.cfg.jump_rise;
         let mut buf = Vec::new();
-        let mut expanded = 0;
-        while let Some(Open { node, f }) = open.pop() {
-            if f > *g.get(&node).unwrap_or(&f32::MAX) + 1e-4 {
+        let mut spent = 0usize;
+        while spent < budget {
+            let Some(Open { node, f }) = search.open.pop() else {
+                search.done = true;
+                return;
+            };
+            if f > *search.g.get(&node).unwrap_or(&f32::MAX) + 1e-4 {
                 continue;
             }
-            expanded += 1;
-            if expanded > cfg.max_nodes {
-                break;
+            search.expanded += 1;
+            spent += 1;
+            if search.expanded > search.cfg.max_nodes {
+                search.done = true;
+                return;
             }
             self.neighbours(node, &mut buf);
             for (m, cost, _) in buf.clone() {
                 let ng = f + cost;
-                if ng > max_cost || (m.ix - start.ix).abs() > cfg.radius_cells || (m.iz - start.iz).abs() > cfg.radius_cells {
+                if ng > search.max_cost || (m.ix - search.start.ix).abs() > search.cfg.radius_cells || (m.iz - search.start.iz).abs() > search.cfg.radius_cells {
                     continue;
                 }
-                if ng < *g.get(&m).unwrap_or(&f32::MAX) {
-                    g.insert(m, ng);
-                    open.push(Open { f: ng, node: m });
+                if ng < *search.g.get(&m).unwrap_or(&f32::MAX) {
+                    search.g.insert(m, ng);
+                    search.open.push(Open { f: ng, node: m });
                 }
             }
         }
-        g.into_iter().map(|(n, c)| (n.pos(), c)).collect()
     }
 }
 

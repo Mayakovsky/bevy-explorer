@@ -271,3 +271,43 @@ fn the_reachable_spot_list_grows_with_the_jump_range() {
     assert_eq!(n(&mut w, 1.4), 0);
     assert!(n(&mut w, 8.0) > 0);
 }
+
+#[test]
+fn a_reachable_search_run_in_slices_gives_the_same_spots_as_one_call() {
+    let mut w = World { boxes: vec![B(10.0, 14.0, -2.0, 2.0, 0.0, 1.3), B(-6.0, -5.0, -8.0, 8.0, 0.0, 3.0)] };
+    let cfg = PlanConfig { jump_rise: 1.4, radius_cells: 40, ..PlanConfig::default() };
+    let from = Vec3::new(0.5, 0.0, 0.5);
+    let mut whole = Planner::new(&mut w).reachable(from, 40.0, &cfg);
+    let mut planner = Planner::new(&mut w);
+    let mut search = planner.reach_start(from, 40.0, &cfg).expect("a start");
+    let mut slices = 0;
+    while !search.done {
+        planner.reach_step(&mut search, 50);
+        slices += 1;
+    }
+    assert!(slices > 3, "the search needed several slices");
+    // a cache carried over between slices (a fresh planner each frame, as the game loop does) must not change the answer
+    let mut w2 = World { boxes: vec![B(10.0, 14.0, -2.0, 2.0, 0.0, 1.3), B(-6.0, -5.0, -8.0, 8.0, 0.0, 3.0)] };
+    let mut cache = NavCache::default();
+    let mut s2 = {
+        let mut p = Planner::with_cache(&mut w2, std::mem::take(&mut cache));
+        let s = p.reach_start(from, 40.0, &cfg).unwrap();
+        cache = p.into_cache();
+        s
+    };
+    while !s2.done {
+        let mut p = Planner::with_cache(&mut w2, std::mem::take(&mut cache));
+        p.reach_step(&mut s2, 50);
+        cache = p.into_cache();
+    }
+    let key = |v: &mut Vec<(Vec3, f32)>| {
+        v.sort_by(|a, b| (a.0.x, a.0.z, a.0.y).partial_cmp(&(b.0.x, b.0.z, b.0.y)).unwrap());
+    };
+    let mut a = search.spots();
+    let mut b = s2.spots();
+    key(&mut whole);
+    key(&mut a);
+    key(&mut b);
+    assert_eq!(whole.len(), a.len());
+    assert_eq!(whole.len(), b.len());
+}

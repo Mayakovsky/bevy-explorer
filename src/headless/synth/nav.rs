@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 use common::{
-    nav::{glide_options, glide_to_goal, GlideChoice, NavWorld, PlanConfig, PlanError, Planner, Waypoint, Move, AVATAR_RADIUS},
+    nav::{glide_options, glide_to_goal, GlideChoice, NavCache, NavWorld, PlanConfig, ReachSearch, PlanError, Planner, Waypoint, Move, AVATAR_RADIUS},
     structs::PrimaryUser,
 };
 use dcl_component::proto_components::sdk::components::ColliderLayer;
@@ -66,6 +66,17 @@ pub struct Nav {
     pub glide: Option<GlideRun>,
     /// the Synth's power level (set by the `level` command): the planner's jumping moves depend on it
     pub level: u8,
+    /// a reachable-spot search in progress (a slice of it runs every frame)
+    pub spots_job: Option<SpotsJob>,
+}
+
+pub struct SpotsJob {
+    search: ReachSearch,
+    cache: NavCache,
+    from: Vec3,
+    started: Instant,
+    work_ms: f32,
+    frames: u32,
 }
 
 struct EngineWorld<'a, 'b> {
@@ -94,9 +105,9 @@ impl NavWorld for EngineWorld<'_, '_> {
     }
 }
 
-/// planner limits at a power level: the highest ledge a jump gets up onto is about 1.4 m normally and about 5.5 m with the Jump level's double jump (measured: its peak is 6.7 m, not the 9 m the players set)
+/// planner limits at a power level: the highest ledge a jump gets up onto is about 1.4 m normally and about 8 m with the Jump level's double jump (measured: a double jump 0.4 s after the jump peaks at 10.7 m)
 fn cfg(level: u8) -> PlanConfig {
-    PlanConfig { radius_cells: 70, max_nodes: 30_000, goal_tolerance: 1.2, jump_rise: if level >= 2 { 5.5 } else { 1.4 }, ..Default::default() }
+    PlanConfig { radius_cells: 70, max_nodes: 30_000, goal_tolerance: 1.2, jump_rise: if level >= 2 { 8.0 } else { 1.4 }, ..Default::default() }
 }
 
 fn dcl_list(path: &[Waypoint]) -> Vec<serde_json::Value> {
@@ -183,32 +194,17 @@ pub fn nav_plan(
             start_glide(&mut nav, choice, usize::from(choice.is_some()), from, ms, time.elapsed_secs(), "to");
         }
         NavRequest::Spots { max_cost } => {
-            // the spot list reaches farther than a route plan does (a long run, up to about 100 m, needs spots near the top of its budget)
+            // the spot list reaches farther than a route plan does (a long run, up to about 100 m, needs spots near the top of its budget). It is computed a slice of
+            // nodes per frame (see `nav_spots_step`) so the Synth keeps moving or hiding while the list is built, however long a chase is going on.
             let spot_cfg = PlanConfig { radius_cells: 105, max_nodes: 30_000, ..cfg(nav.level) };
-            let cells = Planner::new(&mut world).reachable(from, max_cost, &spot_cfg);
-            let ms = t0.elapsed().as_millis() as u64;
-            // one spot per square, the cheapest in it: 3 m squares near the Synth, 6 m squares from 30 m of walking, 10 m squares from 70 m, so the list reaches the
-            // whole walking range with under a thousand spots (the first version kept the 700 nearest and never listed anything farther than about 47 m)
-            let mut best: std::collections::HashMap<(i32, i32, i32, i32), (Vec3, f32)> = std::collections::HashMap::new();
-            for (p, c) in cells {
-                let (cell, band) = if c < 30.0 { (3.0, 0) } else if c < 70.0 { (6.0, 1) } else { (10.0, 2) };
-                let key = ((p.x / cell).floor() as i32, (p.z / cell).floor() as i32, (p.y / 1.5).floor() as i32, band);
-                let e = best.entry(key).or_insert((p, c));
-                if c < e.1 {
-                    *e = (p, c);
+            let mut planner = Planner::new(&mut world);
+            match planner.reach_start(from, max_cost, &spot_cfg) {
+                Some(search) => {
+                    let cache = planner.into_cache();
+                    nav.spots_job = Some(SpotsJob { search, cache, from, started: Instant::now(), work_ms: t0.elapsed().as_secs_f32() * 1000.0, frames: 0 });
                 }
+                None => emit(json!({"event": "nav_spots", "count": 0, "from": dcl_position(from), "spots": [], "ms": 0})),
             }
-            let mut spots: Vec<_> = best.into_values().collect();
-            spots.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            spots.truncate(900);
-            let list: Vec<_> = spots
-                .iter()
-                .map(|(p, c)| {
-                    let d = dcl_position(*p);
-                    json!({"x": (d[0] * 10.0).round() / 10.0, "y": (d[1] * 10.0).round() / 10.0, "z": (d[2] * 10.0).round() / 10.0, "cost": (c * 10.0).round() / 10.0})
-                })
-                .collect();
-            emit(json!({"event": "nav_spots", "count": list.len(), "from": dcl_position(from), "spots": list, "ms": ms}));
         }
     }
 }
@@ -357,4 +353,48 @@ pub fn glide_follow(mut nav: ResMut<Nav>, mut state: ResMut<SynthState>, player:
         }
     }
     nav.glide = Some(g);
+}
+
+/// Work on the reachable-spot search for a few milliseconds a frame; when it finishes, emit the list (one spot per square: 3 m squares near the Synth, 6 m from 30 m of
+/// walking, 10 m from 70 m, up to 900).
+pub fn nav_spots_step(mut nav: ResMut<Nav>, mut scenes: Query<&mut SceneColliderData>, landscape: Option<Res<Landscape>>) {
+    let Some(mut job) = nav.spots_job.take() else { return };
+    let t0 = Instant::now();
+    {
+        let mut guards: Vec<Mut<SceneColliderData>> = scenes.iter_mut().collect();
+        let mut world = EngineWorld { scenes: &mut guards, landscape: landscape.as_deref() };
+        let cache = std::mem::take(&mut job.cache);
+        let mut planner = Planner::with_cache(&mut world, cache);
+        // about 6 ms of work a frame
+        while !job.search.done && t0.elapsed().as_secs_f32() < 0.006 {
+            planner.reach_step(&mut job.search, 150);
+        }
+        job.cache = planner.into_cache();
+    }
+    job.work_ms += t0.elapsed().as_secs_f32() * 1000.0;
+    job.frames += 1;
+    if !job.search.done {
+        nav.spots_job = Some(job);
+        return;
+    }
+    let mut best: std::collections::HashMap<(i32, i32, i32, i32), (Vec3, f32)> = std::collections::HashMap::new();
+    for (p, c) in job.search.spots() {
+        let (cell, band) = if c < 30.0 { (3.0, 0) } else if c < 70.0 { (6.0, 1) } else { (10.0, 2) };
+        let key = ((p.x / cell).floor() as i32, (p.z / cell).floor() as i32, (p.y / 1.5).floor() as i32, band);
+        let e = best.entry(key).or_insert((p, c));
+        if c < e.1 {
+            *e = (p, c);
+        }
+    }
+    let mut spots: Vec<_> = best.into_values().collect();
+    spots.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    spots.truncate(900);
+    let list: Vec<_> = spots
+        .iter()
+        .map(|(p, c)| {
+            let d = dcl_position(*p);
+            json!({"x": (d[0] * 10.0).round() / 10.0, "y": (d[1] * 10.0).round() / 10.0, "z": (d[2] * 10.0).round() / 10.0, "cost": (c * 10.0).round() / 10.0})
+        })
+        .collect();
+    emit(json!({"event": "nav_spots", "count": list.len(), "from": dcl_position(job.from), "spots": list, "ms": job.started.elapsed().as_millis() as u64, "work_ms": job.work_ms.round(), "frames": job.frames, "expanded": job.search.expanded()}));
 }
