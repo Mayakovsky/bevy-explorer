@@ -569,7 +569,9 @@ fn supervisor(
 
     // Orchestrated: a broken scene is reported (scene-broken event) and removed by the
     // orchestrator — it must NOT take the other scenes down with an engine exit.
-    if any_broken && orchestrated.is_none() {
+    // Emanate (round 24): the Synth wanders through other people's scenes, any of which may fail to start ("onStart is not a function") or stop answering for 10 s; the OVH freeze records show
+    // exactly one `is broken` scene before each of 9 process deaths and none in the hours at the park spot. EMANATE_KEEP_RUNNING_ON_BROKEN=1 logs the broken scene and keeps running (default: the old exit).
+    if any_broken && orchestrated.is_none() && std::env::var("EMANATE_KEEP_RUNNING_ON_BROKEN").is_err() {
         exit.write(AppExit::from_code(1));
     }
 
