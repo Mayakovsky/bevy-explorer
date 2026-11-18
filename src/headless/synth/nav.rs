@@ -262,7 +262,12 @@ pub fn nav_follow(
         let wp = nav.path[nav.idx];
         let last = nav.idx + 1 == nav.path.len();
         let dh = Vec2::new(wp.pos.x - pos.x, wp.pos.z - pos.z).length();
-        if dh < if last { 0.6 } else { REACH } {
+        // round 24: a waypoint is reached HORIZONTALLY and at its HEIGHT. The old rule was horizontal only: a double jump onto a roof reaches the spot's column at the apex of the arc
+        // (the live tests logged arrivals at 12.5 to 14.2 m for a 9.6 m spot) and reported `arrived` in mid-air, which the brain rightly refused as a wrong-height arrival. The last waypoint
+        // (and any jump target) must also be within 1.5 m of its height, and the last one on the ground.
+        let vert_ok = (pos.y - wp.pos.y).abs() < 1.5 && (!last || state.grounded);
+        let needs_vert = last || wp.how == Move::Jump;
+        if dh < if last { 0.6 } else { REACH } && (vert_ok || !needs_vert) {
             nav.idx += 1;
             nav.blocks_here = 0;
         } else {
