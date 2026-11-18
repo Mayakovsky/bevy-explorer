@@ -283,6 +283,15 @@ pub fn nav_follow(
     }
     let wp = nav.path[nav.idx];
     let dh = Vec2::new(wp.pos.x - pos.x, wp.pos.z - pos.z).length();
+    // round 24 (level 2 probe, 18 Nov): a double jump overshoots the ledge (the apex was 14 to 17 m for a 9.6 m spot) and the walk goal clears itself when the avatar is over the goal's column:
+    // that is an ARRIVAL IN THE AIR, not a block. Wait for the landing (the waypoint check above finishes the route once it is grounded at the height); replanning here made four
+    // replans and a false `stuck/blocked` while the avatar was still falling onto the right level.
+    let last = nav.idx + 1 == nav.path.len();
+    if !state.grounded && pos.y > wp.pos.y + 1.0 && dh < if last { 0.9 } else { REACH + 0.5 } {
+        state.goal = None;
+        nav.just_set = false;
+        return;
+    }
     // blocked by the movement system (it cleared the goal): jump first, then replan
     if state.goal.is_none() && nav.just_set {
         nav.blocks_here += 1;
